@@ -36,6 +36,15 @@ export const api = {
   rejectDocument: (id, rejectedBy, reason) =>
     send(`/api/v1/documents/${id}/reject`, "POST", { rejected_by: rejectedBy, reason }),
   retryExtraction: (id) => fetch(`/api/v1/documents/${id}/extract`, { method: "POST" }),
+  /* Overwrites one page's stored image with a reviewer's marked-up version —
+     same path, same filename, so nothing else pointing at it (file_paths,
+     the review screen's own <img>) needs to change. Multipart, so it does
+     not go through send(). */
+  replaceDocumentPage: (id, pageIndex, blob) => {
+    const form = new FormData();
+    form.append("file", blob, "page");
+    return fetch(`/api/v1/documents/${id}/pages/${pageIndex}`, { method: "PUT", body: form }).then(json);
+  },
   /* The console's Process/Draft choice for a batch just scanned in from the
      phone (see process_batch / draft_batch in Backend/main.py) — both clear
      awaiting_scan_decision so the batch stops being hidden; Process also

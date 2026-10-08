@@ -1553,6 +1553,49 @@ table.data td.quote-cell { padding: 0; }
   width: 92px; height: 118px; object-fit: cover;
   border-radius: var(--r-btn); border: 1px solid var(--hair); display: block;
 }
+.doc-page { position: relative; flex: none; width: 92px; height: 118px; }
+/* Sits over the thumbnail's own corner rather than beside it — a page's
+   markup entry point needs to read as "act on this page", not as a fifth
+   thumbnail-sized tile competing with the real pages next to it. */
+.doc-page-edit {
+  position: absolute; top: 4px; right: 4px; z-index: 1;
+  width: 26px; height: 26px; padding: 0;
+  border: 1px solid var(--line); border-radius: 50%;
+  background: rgba(255, 255, 255, .92); color: var(--ink);
+  display: grid; place-items: center; cursor: pointer;
+}
+.doc-page-edit svg { width: 14px; height: 14px; }
+.doc-page-edit:hover { background: var(--surface); color: var(--ink); }
+
+/* ── page markup ──────────────────────────────────────────────────────────── */
+/* Above the review modal's own .backdrop (z-index 60) — the markup tool is
+   a nested overlay, opened from a page already inside that modal. */
+.markup-backdrop { z-index: 70; }
+.markup-shell {
+  width: 100%; max-width: 1100px; max-height: 92vh;
+  display: flex; flex-direction: column; gap: var(--s2);
+  background: var(--surface); border-radius: var(--r-stad);
+  box-shadow: var(--lift-2); padding: var(--s3);
+}
+.markup-toolbar { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.markup-colors { display: flex; gap: 8px; }
+.markup-swatch {
+  width: 26px; height: 26px; padding: 0; border-radius: 50%;
+  border: 2px solid var(--surface); box-shadow: 0 0 0 1.5px var(--line);
+  cursor: pointer;
+}
+.markup-swatch.is-active { box-shadow: 0 0 0 2px var(--ink); }
+.markup-canvas-wrap {
+  flex: 1; min-height: 0; overflow: auto;
+  display: grid; place-items: center;
+  background: var(--canvas); border-radius: var(--r-btn);
+}
+.markup-canvas {
+  max-width: 100%; max-height: 78vh; width: auto; height: auto;
+  touch-action: none; cursor: crosshair;
+  background: #fff;
+}
+.markup-err { margin: 0; }
 /* A generated Purchase Bill's stand-in for a scanned page thumbnail — same
    92x118 slot as .doc-pages img, just a clipped, scaled-down crop of the
    real voucher (see PurchaseBillPreview) instead of a photo. 760px is the

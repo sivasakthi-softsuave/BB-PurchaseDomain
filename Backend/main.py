@@ -363,6 +363,32 @@ def stored_path(directory: Path, name: str) -> str:
     return f"uploads/{directory.name}/{name}"
 
 
+def stamp_file_paths(paths: list[str]) -> list[str]:
+    """Tags each path with its own file's last-modified time.
+
+    file_paths itself never changes when a page's image is replaced (see
+    replace_document_page) — the filename on disk is reused as-is. Without
+    something that does change, every consumer (the review screen, its
+    thumbnail in the document register, a browser reopening the same
+    document later) just keeps serving whatever it already cached under
+    that same unchanging URL. Best-effort: a file that's gone missing reads
+    as mtime 0 rather than failing the whole document out of the list.
+    """
+    stamped = []
+    for p in paths:
+        try:
+            # Nanoseconds, not whole seconds: two saves close enough together
+            # to land in the same second (a quick correction right after the
+            # first one) would otherwise stamp both with the same query
+            # string, and the second save's bytes would sit behind a browser
+            # cache entry keyed off the first.
+            mtime = (UPLOAD_DIR / Path(p).relative_to("uploads")).stat().st_mtime_ns
+        except OSError:
+            mtime = 0
+        stamped.append(f"{p}?v={mtime}")
+    return stamped
+
+
 def qr_svg(data: str) -> str:
     img = qrcode.make(data, image_factory=qrcode.image.svg.SvgPathImage, box_size=9, border=2)
     buf = io.BytesIO()
@@ -380,7 +406,7 @@ def row_to_document(row: sqlite3.Row) -> dict:
         "site_id": row["site_id"],
         "source": row["source"],
         "document_type": row["document_type"],
-        "file_paths": json.loads(row["file_paths"]),
+        "file_paths": stamp_file_paths(json.loads(row["file_paths"])),
         "page_count": row["page_count"],
         "status": row["status"],
         "duplicate_of": row["duplicate_of"],
@@ -1988,6 +2014,45 @@ def update_document(document_id: str, body: dict):
                 )
 
     return get_document(document_id)
+
+
+@app.put("/api/v1/documents/{document_id}/pages/{page_index}")
+async def replace_document_page(document_id: str, page_index: int, file: UploadFile = File(...)):
+    """Overwrite one page's stored image in place — used by the review
+    screen's markup tool, so a reviewer's annotated re-save lands on exactly
+    the file every existing link (file_paths, the /uploads mount) already
+    points at, rather than becoming a new upload.
+
+    Gated the same way update_document is: only while the document is still
+    EXTRACTED, since a decision was made against the page image as it stood.
+    """
+    with db.db() as con:
+        if not extract.claim_for_edit(con, document_id):
+            row = con.execute(
+                "SELECT status FROM documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, "No such document")
+            raise HTTPException(409, f"Document is {row['status']} — cannot edit")
+
+        row = con.execute(
+            "SELECT file_paths FROM documents WHERE id = ?", (document_id,)
+        ).fetchone()
+
+    file_paths = json.loads(row["file_paths"])
+    if not (0 <= page_index < len(file_paths)):
+        raise HTTPException(400, "No such page")
+
+    body = await file.read()
+    if media.identify(body[:media.HEADER_BYTES]) is None:
+        raise HTTPException(400, f"unsupported file — only {media.ACCEPTED} can be read")
+
+    # file_paths entries are spelled "uploads/<dir>/<name>" (see stored_path) —
+    # relative to where the /uploads mount actually lives on disk.
+    target = UPLOAD_DIR / Path(file_paths[page_index]).relative_to("uploads")
+    target.write_bytes(body)
+
+    return {"file_path": file_paths[page_index]}
 
 
 @app.post("/api/v1/documents/{document_id}/approve")

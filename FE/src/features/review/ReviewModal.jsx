@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Modal } from "../../components/Modal.jsx";
+import { IconPencil } from "../../components/Icons.jsx";
 import { HeaderFields } from "./HeaderFields.jsx";
 import { LineItems } from "./LineItems.jsx";
+import { MarkupEditor, mimeTypeForPath } from "./MarkupEditor.jsx";
 import { openPurchaseBillTab, PurchaseBillPreview, PurchaseBillVoucher } from "./PurchaseBillVoucher.jsx";
 import { HEADER_KEYS, LINE_FIELDS } from "./schema.js";
 import { IconEdit } from "../../components/Icons.jsx";
@@ -78,6 +80,7 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [diff, setDiff] = useState(null);
   const [lineIssues, setLineIssues] = useState({});
+  const [editingPageIndex, setEditingPageIndex] = useState(null);
 
   /* Load, then re-read only while extraction is still running — the loop
      schedules its own next tick and so stops itself the moment the document
@@ -234,6 +237,21 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
     onChanged();
   };
 
+  /* Overwrites the page's file on disk in place (see replaceDocumentPage) —
+     file_paths itself never changes, only the file's own mtime, which is
+     what re-fetching the document picks up as a fresh cache-busting query
+     string on its path (see stamp_file_paths server-side). Re-reading here
+     rather than trusting a locally-bumped counter is what keeps a *reopened*
+     modal from requesting the exact URL the browser already cached the old
+     bytes under. */
+  const saveMarkup = async (pageIndex, blob) => {
+    await api.replaceDocumentPage(docId, pageIndex, blob);
+    const fresh = await api.getDocument(docId).catch(() => null);
+    if (fresh) setDoc(fresh);
+    setEditingPageIndex(null);
+    onChanged();
+  };
+
   /* The one thing this refuses to do is close while extraction is still
      running — there's nothing to review yet, and a reviewer who dismisses
      it now has no way back to it except finding it again in a list, so
@@ -261,6 +279,12 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
      in between rather than forcing every caller to null-check gates. */
   const gates = header ? gatesFor(header) : gatesFor({});
   const showFooter = doc && !isWaiting(doc) && doc.status !== "FAILED" && !locked && Boolean(header);
+  // A decision was made against the page image as it stood — same window
+  // update_document itself edits within (see replace_document_page's own
+  // claim_for_edit gate), just without also requiring FAILED extraction to
+  // have cleared first, since marking up the scan is exactly what a
+  // reviewer would do before retrying a failed read.
+  const canEditImage = doc && !isWaiting(doc) && !locked;
 
   /* Every PO already on file in this same document's project — not other
      projects, since a PO number only ever means something within the one
@@ -313,6 +337,7 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
       : [];
 
   return (
+    <>
     <Modal
       title="Review document"
       subtitle={subtitle}
@@ -356,9 +381,21 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
           ) : null}
           <div className="doc-pages">
             {doc.file_paths.map((path, i) => (
-              <a key={path} href={`/${path}`} target="_blank" rel="noopener noreferrer">
-                <img src={`/${path}`} alt={`page ${i + 1}`} />
-              </a>
+              <div key={path} className="doc-page">
+                <a href={`/${path}`} target="_blank" rel="noopener noreferrer">
+                  <img src={`/${path}`} alt={`page ${i + 1}`} />
+                </a>
+                {canEditImage ? (
+                  <button
+                    type="button"
+                    className="doc-page-edit"
+                    title="Mark up this page"
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); setEditingPageIndex(i); }}
+                  >
+                    <IconPencil />
+                  </button>
+                ) : null}
+              </div>
             ))}
             {/* A generated Purchase Bill (see ComparePage's Generate
                 Purchase Bill) never had a paper page to scan — file_paths
@@ -445,6 +482,15 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
         </>
       )}
     </Modal>
+    {editingPageIndex != null && doc ? (
+      <MarkupEditor
+        imageUrl={`/${doc.file_paths[editingPageIndex]}`}
+        mimeType={mimeTypeForPath(doc.file_paths[editingPageIndex])}
+        onClose={() => setEditingPageIndex(null)}
+        onSave={(blob) => saveMarkup(editingPageIndex, blob)}
+      />
+    ) : null}
+    </>
   );
 }
 

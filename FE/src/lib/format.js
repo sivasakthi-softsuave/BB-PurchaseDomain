@@ -110,7 +110,10 @@ export function checkArithmetic(header, lines) {
   return { badLines, headerMismatch };
 }
 
-export const IMAGE_RE = /\.(png|jpe?g|gif|webp)$/i;
+// file_paths entries carry a cache-busting "?v=<mtime>" query string (see
+// stamp_file_paths server-side), so the extension isn't always the very
+// end of the string — it's the end, or right before a "?".
+export const IMAGE_RE = /\.(png|jpe?g|gif|webp)(\?|$)/i;
 export const ALLOWED_UPLOAD_RE = /\.(pdf|jpe?g|png)$/i;
 
 export const DOC_TYPES = [

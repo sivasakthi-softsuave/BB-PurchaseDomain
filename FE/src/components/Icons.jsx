@@ -244,3 +244,19 @@ export const IconBell = (p) => (
     <path d="M10 19a2 2 0 0 0 4 0" />
   </svg>
 );
+
+/* The markup tool's own marker — used both on the page thumbnail's edit
+   button and in the editor's own toolbar. */
+export const IconPencil = (p) => (
+  <svg {...base} {...p}>
+    <path d="M4 20l.9-4.2L15.5 5.2a1.5 1.5 0 0 1 2.1 0l1.2 1.2a1.5 1.5 0 0 1 0 2.1L8.2 19.1z" />
+    <path d="M14 7.5l2.5 2.5" />
+  </svg>
+);
+
+export const IconUndo = (p) => (
+  <svg {...base} {...p}>
+    <path d="M9 15L4 10l5-5" />
+    <path d="M4 10h10a6 6 0 0 1 0 12h-1" />
+  </svg>
+);
