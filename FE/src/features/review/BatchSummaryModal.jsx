@@ -54,6 +54,7 @@ export function BatchSummaryModal({ ids, onNext, onClose }) {
       <ul className="batch-list">
         {items.map((d) => {
           const file = d.file_paths?.[0];
+          const label = isWaiting(d) ? "Reading…" : d.status === "FAILED" ? "Failed" : docTypeLabel(d.document_type);
           return (
             <li className="batch-row" key={d.document_id}>
               {file ? (
@@ -67,8 +68,8 @@ export function BatchSummaryModal({ ids, onNext, onClose }) {
                 <div className="batch-row-id">{d.document_id}</div>
                 {d.doc_number ? <div className="c-ref">{d.doc_number}</div> : null}
               </div>
-              <span className={`pill ${isWaiting(d) ? "s-working" : statusClass(d.status)}`}>
-                {isWaiting(d) ? "Reading…" : d.status === "FAILED" ? "Failed" : docTypeLabel(d.document_type)}
+              <span className={`pill ${isWaiting(d) ? "s-working" : statusClass(d.status)}`} title={label}>
+                {label}
               </span>
             </li>
           );

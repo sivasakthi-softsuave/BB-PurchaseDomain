@@ -1,8 +1,8 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StatusPill, TypePill } from "../../components/Pills.jsx";
 import {
   IconAlertTriangle, IconArrow, IconBack, IconCheck, IconChevron, IconClock, IconClose,
-  IconExternalLink, IconTrash, IconTruck, IconZoomIn, IconZoomOut,
+  IconEdit, IconExternalLink, IconTrash, IconTruck, IconZoomIn, IconZoomOut,
 } from "../../components/Icons.jsx";
 import { AddDocumentMenu } from "../../components/AddDocumentMenu.jsx";
 import { DocumentsSection } from "../../components/DocumentsSection.jsx";
@@ -13,7 +13,7 @@ import { LineItems } from "../../features/review/LineItems.jsx";
 import { HEADER_KEYS, LINE_FIELDS } from "../../features/review/schema.js";
 import { api } from "../../lib/api.js";
 import { go } from "../../lib/useHashRoute.js";
-import { docTypeLabel, isLocked, isWaiting, longDate, money, qty, shortDate } from "../../lib/format.js";
+import { docTypeLabel, eventTime, isLocked, isWaiting, longDate, money, qty, shortDate } from "../../lib/format.js";
 
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
@@ -93,6 +93,59 @@ function DocumentPreview({ filePaths }) {
       ) : (
         <div className="empty-mini" style={{ padding: "var(--s3)" }}>No scanned page for this document.</div>
       )}
+    </div>
+  );
+}
+
+// What sits on the line in place of an icon — same small dot for every
+// kind of event; what happened is in the text, not the marker's colour.
+function EventLine({ ev }) {
+  return (
+    <li>
+      <span className="timeline-event-dot" />
+      {ev.text} — <span className="timeline-event-time">{eventTime(ev.at)}</span>
+    </li>
+  );
+}
+
+/* The PO document's own history — captured, approved/rejected, and edited
+   (the pencil-edit toggle lets an approved PO be corrected same as any
+   other document) — same event vocabulary and dot-and-line rail as a
+   delivery's own history in the Delivery info tab's Delivery Timeline, just
+   for one document instead of a whole group of them, so there's no
+   collapse/expand or "next delivery" concept needed here. */
+function DocumentTimeline({ doc }) {
+  const events = useMemo(() => {
+    const label = docTypeLabel(doc.document_type);
+    const list = [];
+    if (doc.uploaded_at) list.push({ at: doc.uploaded_at, kind: "captured", text: `${label} captured` });
+    if (doc.status === "APPROVED" && doc.header?.reviewed_at) {
+      list.push({
+        at: doc.header.reviewed_at, kind: "approved",
+        text: `${label} approved by ${doc.header.reviewed_by ?? "—"}`,
+      });
+    } else if (doc.status === "REJECTED" && doc.header?.reviewed_at) {
+      list.push({
+        at: doc.header.reviewed_at, kind: "rejected",
+        text: `${label} rejected by ${doc.header.reviewed_by ?? "—"}`
+          + (doc.header.rejection_reason ? ` — ${doc.header.rejection_reason}` : ""),
+      });
+    }
+    list.push(...editEvents(doc.header?.edit_history, doc.header?.edited_by, doc.header?.edited_at, label));
+    return list.sort((a, b) => toMs(a.at) - toMs(b.at));
+  }, [doc]);
+
+  if (!events.length) return null;
+
+  return (
+    <div className="card compare-links delivery-timeline">
+      <div className="aside-card-head">
+        <span className="aside-card-icon"><IconClock width={18} height={18} /></span>
+        <h3>Document Timeline</h3>
+      </div>
+      <ul className="timeline-events timeline-events-standalone">
+        {events.map((ev, i) => <EventLine key={i} ev={ev} />)}
+      </ul>
     </div>
   );
 }
@@ -265,9 +318,9 @@ function PoMaterialsSection({ materials, loading, onOpenDocument }) {
    actually makes a delivery's quantity count toward the PO (see
    po_reconciliation's docstring in main.py). */
 function VerificationPill({ status }) {
-  if (status === "verified") return <span className="pill s-approved">Verified</span>;
-  if (status === "mismatch") return <span className="pill s-rejected">Mismatch</span>;
-  return <span className="pill s-pending">Awaiting verification</span>;
+  if (status === "verified") return <span className="pill s-approved" title="Verified">Verified</span>;
+  if (status === "mismatch") return <span className="pill s-rejected" title="Mismatch">Mismatch</span>;
+  return <span className="pill s-pending" title="Awaiting verification">Awaiting verification</span>;
 }
 
 /* One delivery's diff line between two named documents — labelA/labelB are
@@ -336,29 +389,109 @@ function DeliverySummary({ po, deliveries, deliveredValue, status }) {
         <div><dt>Delivered Value</dt><dd>{money(deliveredValue) ?? "—"}</dd></div>
         <div>
           <dt>Delivery Status</dt>
-          <dd>{status ? <span className={`pill ${statusClass}`}>{statusLabel}</span> : "—"}</dd>
+          <dd>{status ? <span className={`pill ${statusClass}`} title={statusLabel}>{statusLabel}</span> : "—"}</dd>
         </div>
       </dl>
     </div>
   );
 }
 
-/* One entry per delivery, dated by the earliest document any of its
-   Invoice/MIN Voucher/Purchase Bill actually carries — real capture dates,
-   not a promised delivery schedule this data has no concept of, which is
-   also why "Next delivery" below is always the same static placeholder
-   rather than a forecast. */
-function DeliveryTimeline({ deliveries }) {
-  const events = useMemo(() => {
+// uploaded_at ("2026-09-26 11:51:27") and reviewed_at/edited_at/deleted_at
+// ("2026-09-26T11:51:39+00:00") come back in two different shapes — this is
+// the one place both get compared against each other, so it parses either
+// into a real instant rather than relying on either's own raw string order.
+// uploaded_at is genuinely UTC (SQLite's own datetime('now')) but carries no
+// offset, so it's forced to +00:00 explicitly here — left as-is, a browser
+// not itself on UTC parses it as *local* time instead, shifting every
+// "captured" event by the viewer's own UTC offset relative to every
+// reviewed_at/edited_at/deleted_at (which already says +00:00), and it was
+// exactly that shift burying a document's own "captured" line away from its
+// "approved" one even when the two were seconds apart.
+const toMs = (stamp) => {
+  const s = String(stamp).replace(" ", "T");
+  return new Date(/[+-]\d\d:\d\d$|Z$/.test(s) ? s : `${s}+00:00`).getTime();
+};
+
+/* One "edited" event per actual edit (see document_edits in db.py), not
+   one whose timestamp just kept moving every time the same approved
+   document was corrected again. Falls back to the single edited_by/
+   edited_at pair doc_headers still carries for a document edited before
+   that table existed, so its one known edit doesn't just vanish. */
+function editEvents(history, fallbackBy, fallbackAt, label) {
+  const list = history?.length ? history
+    : (fallbackBy && fallbackAt ? [{ edited_by: fallbackBy, edited_at: fallbackAt }] : []);
+  return list.map((e) => ({ at: e.edited_at, kind: "edited", text: `${label} edited by ${e.edited_by}` }));
+}
+
+/* One entry per delivery, oldest first — "Next delivery" (below) reads
+   naturally as moving forward in time from the one before it, and only runs
+   out once every real delivery has had its turn.
+
+   Each entry is its own document's worth of history, not one summary
+   sentence: captured (uploaded), approved or rejected, and — since the
+   pencil-edit toggle lets an approved document be corrected — edited,
+   across every document the delivery is made of (Invoice, MIN Voucher,
+   Purchase Bill, and a real Delivery challan when one exists). Sorted
+   chronologically so the sequence of events reads the way it happened, not
+   grouped by which document produced it.
+
+   The first delivery's own history starts open — openKeys is which
+   deliveries' history is currently showing, independent of one another:
+   opening one doesn't close any other that's already open, only its own
+   title click does that. */
+function DeliveryTimeline({ deliveries, maxHeightPx }) {
+  const entries = useMemo(() => {
     return deliveries
       .map((d) => {
-        const dates = d.documents.map((doc) => doc.uploaded_at).filter(Boolean).sort();
-        const types = [...new Set(d.documents.map((doc) => docTypeLabel(doc.document_type)))];
-        return { key: d.doc_number, date: dates[0], types, status: d.verification.status };
+        const events = [];
+        // deleted_documents is folded in here only — a document already
+        // deleted has nothing left to open, so it stays out of d.documents
+        // itself, which the Delivery info list below still renders as
+        // clickable rows (see po_reconciliation in main.py).
+        [...d.documents, ...(d.deleted_documents ?? [])].forEach((doc) => {
+          const label = docTypeLabel(doc.document_type);
+          if (doc.uploaded_at) events.push({ at: doc.uploaded_at, kind: "captured", text: `${label} captured` });
+          if (doc.status === "APPROVED" && doc.reviewed_at) {
+            events.push({
+              at: doc.reviewed_at, kind: "approved",
+              text: `${label} approved by ${doc.reviewed_by ?? "—"}`,
+            });
+          } else if (doc.status === "REJECTED" && doc.reviewed_at) {
+            events.push({
+              at: doc.reviewed_at, kind: "rejected",
+              text: `${label} rejected by ${doc.reviewed_by ?? "—"}`
+                + (doc.rejection_reason ? ` — ${doc.rejection_reason}` : ""),
+            });
+          }
+          events.push(...editEvents(doc.edit_history, doc.edited_by, doc.edited_at, label));
+          if (doc.deleted_at) {
+            events.push({ at: doc.deleted_at, kind: "deleted", text: `${label} deleted` });
+          }
+        });
+        // Sorted by actual instant, not by the raw string — uploaded_at
+        // comes back as "2026-09-26 11:51:27" (a space) while reviewed_at/
+        // edited_at/deleted_at are ISO ("...T11:51:39+00:00"), and a plain
+        // string compare puts every space-formatted timestamp before every
+        // T-formatted one regardless of which actually happened first —
+        // which used to bury a document's own "captured" line away from
+        // its "approved"/"edited"/"deleted" line even when they were
+        // seconds apart.
+        events.sort((a, b) => toMs(a.at) - toMs(b.at));
+        return {
+          key: d.doc_number, docNumber: d.doc_number,
+          date: events[0]?.at, events, status: d.verification.status,
+        };
       })
       .filter((e) => e.date)
-      .sort((a, b) => (a.date < b.date ? 1 : -1));
+      .sort((a, b) => toMs(a.date) - toMs(b.date));
   }, [deliveries]);
+
+  const [openKeys, setOpenKeys] = useState(() => new Set(entries[0] ? [entries[0].key] : []));
+  const toggleOpen = (key) => setOpenKeys((prev) => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  });
 
   return (
     <div className="card compare-links delivery-timeline">
@@ -366,21 +499,43 @@ function DeliveryTimeline({ deliveries }) {
         <span className="aside-card-icon"><IconClock width={18} height={18} /></span>
         <h3>Delivery Timeline</h3>
       </div>
-      <ul className="timeline">
-        {events.map((e) => (
-          <li key={e.key}>
-            <span className={`timeline-dot ${e.status === "verified" ? "d-ok" : e.status === "mismatch" ? "d-no" : "d-ink"}`} />
-            <div>
-              <div className="timeline-date">{longDate(e.date)}</div>
-              <div className="timeline-desc">
-                {e.types.join(", ")} captured.{" "}
-                {e.status === "verified" ? "All documents extracted and verified."
-                  : e.status === "mismatch" ? "Documents disagree — see Issues below."
-                  : "Still awaiting a matching document."}
+      <ul className="timeline" style={{ maxHeight: `${maxHeightPx || 600}px` }}>
+        {entries.map((e) => {
+          const isOpen = openKeys.has(e.key);
+          // Collapsed, only the most recent few show — oldest to newest,
+          // same order as the full list — with a hint below them to expand
+          // for whatever's earlier. Open, the full history's there instead.
+          const shown = e.events.slice(-5);
+          const earlierCount = e.events.length - shown.length;
+          return (
+            <li key={e.key}>
+              <span className={`timeline-dot ${e.status === "verified" ? "d-ok" : e.status === "mismatch" ? "d-no" : "d-ink"}`} />
+              <div
+                className="timeline-entry"
+                role="button"
+                tabIndex={0}
+                aria-expanded={isOpen}
+                onClick={() => toggleOpen(e.key)}
+                onKeyDown={(ev) => {
+                  if (ev.key === "Enter" || ev.key === " ") {
+                    ev.preventDefault();
+                    toggleOpen(e.key);
+                  }
+                }}
+              >
+                <span className="timeline-date">
+                  {e.docNumber ? `${e.docNumber} · ` : ""}{longDate(e.date)}
+                </span>
+                {!isOpen && earlierCount > 0 ? (
+                  <div className="timeline-more">Click to see {earlierCount} previous</div>
+                ) : null}
+                <ul className="timeline-events">
+                  {(isOpen ? e.events : shown).map((ev, j) => <EventLine key={j} ev={ev} />)}
+                </ul>
               </div>
-            </div>
-          </li>
-        ))}
+            </li>
+          );
+        })}
         <li className="is-future">
           <span className="timeline-dot d-mute" />
           <div>
@@ -500,6 +655,11 @@ export function ComparePage({
   const [recon, setRecon] = useState(null);
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("reviewerName") ?? "");
   const [rejecting, setRejecting] = useState(false);
+  /* Reopens an APPROVED PO's form for a correction, without moving it back
+     to EXTRACTED — same pencil-edit toggle as ReviewModal's, on the PO tab
+     here instead of in a popup. Only ever true while po.status is still
+     APPROVED. */
+  const [editingApproved, setEditingApproved] = useState(false);
   const [reason, setReason] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -516,6 +676,22 @@ export function ComparePage({
   // generatePurchaseBillFor below. Null once resolved or cancelled.
   const [pbMismatchFor, setPbMismatchFor] = useState(null);
   const [generatingPbFor, setGeneratingPbFor] = useState(null);
+
+  // Delivery Timeline's own cap tracks the Delivery info tab's main column
+  // instead of sitting at a fixed height regardless of it — past 1200px of
+  // that column, the timeline's own max-height grows by the same amount it
+  // grew by, so it keeps roughly in step with a tab that's already long
+  // rather than looking stunted next to it.
+  const deliveryMainRef = useRef(null);
+  const [deliveryMainHeight, setDeliveryMainHeight] = useState(0);
+  useEffect(() => {
+    const el = deliveryMainRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => setDeliveryMainHeight(entry.contentRect.height));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [section]);
+  const timelineMaxHeight = 600 + Math.max(0, deliveryMainHeight - 1200);
 
   useEffect(() => {
     let cancelled = false;
@@ -563,10 +739,10 @@ export function ComparePage({
       lines: d.lines.map((l) => (l.line_no === lineNo ? { ...l, [key]: value } : l)),
     }));
 
-  const save = useCallback(async ({ silent = false } = {}) => {
+  const save = useCallback(async ({ silent = false, extra = {} } = {}) => {
     setErr("");
     try {
-      const updated = await api.saveDocument(documentId, buildEdits(draft));
+      const updated = await api.saveDocument(documentId, { ...buildEdits(draft), ...extra });
       if (!silent) { setPo(updated); reload(); }
       return updated;
     } catch (e) {
@@ -574,6 +750,37 @@ export function ComparePage({
       return null;
     }
   }, [documentId, draft, reload]);
+
+  /* Pencil at the top of the PO tab — snapshots the PO's current
+     (already-approved) values into draft, same as ReviewModal's version. */
+  const beginEditApproved = () => {
+    setErr("");
+    setDraft({
+      header: { ...(po.header ?? {}) },
+      lines: (po.lines ?? []).map((l) => ({ ...l })),
+    });
+    setEditingApproved(true);
+  };
+
+  /* Same "enter your name first" gate Approve has always had here — see
+     decide() below — applied to this Save instead. Records the name onto
+     edited_by/edited_at server-side (reviewed_by/reviewed_at, the original
+     approval, is left untouched) and drops back to the read-only Approved
+     view on success. */
+  const saveApprovedEdit = async () => {
+    const name = reviewer.trim();
+    if (!name) { setErr("Enter your name first."); return; }
+    localStorage.setItem("reviewerName", name);
+    setBusy(true);
+    const ok = await save({ extra: { edited_by: name } });
+    setBusy(false);
+    if (ok) setEditingApproved(false);
+  };
+
+  const cancelEditApproved = () => {
+    setErr("");
+    setEditingApproved(false);
+  };
 
   const decide = async (kind) => {
     const name = reviewer.trim();
@@ -716,7 +923,7 @@ export function ComparePage({
     : recon.deliveries.every((d) => d.verification.status === "verified") ? "verified"
     : "pending";
 
-  const locked = isLocked(po);
+  const locked = isLocked(po) && !editingApproved;
   const header = locked ? (po.header ?? {}) : draft?.header;
   const lines = locked ? (po.lines ?? []) : draft?.lines;
 
@@ -735,20 +942,22 @@ export function ComparePage({
               <div className="pname">Purchase order — {po.project_name}</div>
             </div>
             <div className="spacer" />
-            <StatusPill status={po.status} />
-            <AddDocumentMenu
-              onScan={() => onScan(project)}
-              onUpload={() => onAddDocument(project)}
-            />
-            <button
-              className="btn btn-out btn-sm"
-              type="button"
-              onClick={() => setConfirmingDeletePo(true)}
-              style={{ marginLeft: 10 }}
-            >
-              <IconTrash width={16} height={16} />
-              Delete
-            </button>
+            <div className="phead-actions">
+              <StatusPill status={po.status} />
+              <AddDocumentMenu
+                onScan={() => onScan(project)}
+                onUpload={() => onAddDocument(project)}
+              />
+              <button
+                className="icon-btn-danger"
+                type="button"
+                aria-label="Delete PO"
+                title="Delete PO"
+                onClick={() => setConfirmingDeletePo(true)}
+              >
+                <IconTrash width={16} height={16} />
+              </button>
+            </div>
           </div>
 
           <div className="phead-meta">
@@ -808,6 +1017,20 @@ export function ComparePage({
         {section === "po" ? (
         <div className="compare-layout">
           <div className="card compare-main">
+            {po.status === "APPROVED" && !editingApproved ? (
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  type="button"
+                  className="icon-btn-bare"
+                  onClick={beginEditApproved}
+                  title="Edit this PO"
+                  aria-label="Edit this PO"
+                >
+                  <IconEdit width={26} height={26} />
+                </button>
+              </div>
+            ) : null}
+
             {isWaiting(po) ? (
               <div className="banner banner-wait">Extraction in progress… this updates automatically.</div>
             ) : null}
@@ -832,6 +1055,22 @@ export function ComparePage({
                     {po.status === "APPROVED"
                       ? `Approved by ${po.header?.reviewed_by} on ${po.header?.reviewed_at}`
                       : `Rejected by ${po.header?.reviewed_by} on ${po.header?.reviewed_at}${po.header?.rejection_reason ? ` — ${po.header.rejection_reason}` : ""}`}
+                  </div>
+                ) : editingApproved ? (
+                  <div className="field-section">
+                    <h3>Decision</h3>
+                    <div className="reviewer-row">
+                      <input
+                        className="input"
+                        placeholder="Your name"
+                        value={reviewer}
+                        onChange={(e) => setReviewer(e.target.value)}
+                      />
+                      <button className="btn btn-ink" onClick={saveApprovedEdit} disabled={busy}>Save</button>
+                      <button className="btn btn-out" onClick={cancelEditApproved} disabled={busy}>Cancel</button>
+                    </div>
+
+                    {err ? <div className="banner banner-err" style={{ marginTop: 16 }}>{err}</div> : null}
                   </div>
                 ) : (
                   <div className="field-section">
@@ -875,11 +1114,12 @@ export function ComparePage({
 
           <div className="compare-aside">
             <DocumentPreview filePaths={po.file_paths} />
+            <DocumentTimeline doc={po} />
           </div>
         </div>
         ) : section === "delivery" ? (
         <div className="compare-layout">
-          <div className="card compare-main">
+          <div className="card compare-main" ref={deliveryMainRef}>
             <h3 style={{ padding: "var(--s3) var(--s3) 0" }}>
               {recon?.deliveries?.length
                 ? `${recon.deliveries.length} deliver${recon.deliveries.length === 1 ? "y" : "ies"}`
@@ -1082,7 +1322,9 @@ export function ComparePage({
             {recon ? (
               <>
                 <DeliverySummary po={po} deliveries={recon.deliveries} deliveredValue={deliveredValue} status={deliveryStatus} />
-                {recon.deliveries.length ? <DeliveryTimeline deliveries={recon.deliveries} /> : null}
+                {recon.deliveries.length ? (
+                  <DeliveryTimeline deliveries={recon.deliveries} maxHeightPx={timelineMaxHeight} />
+                ) : null}
               </>
             ) : null}
           </div>

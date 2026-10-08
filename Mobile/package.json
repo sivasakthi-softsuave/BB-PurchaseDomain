@@ -18,11 +18,13 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@expo/ngrok": "^4.1.3",
     "@types/react": "~19.1.0",
     "typescript": "~5.9.2"
   },
   "scripts": {
     "start": "node ./node_modules/expo/bin/cli start",
+    "start:tunnel": "node ./node_modules/expo/bin/cli start --tunnel",
     "android": "node ./node_modules/expo/bin/cli start --android",
     "ios": "node ./node_modules/expo/bin/cli start --ios",
     "web": "node ./node_modules/expo/bin/cli start --web"

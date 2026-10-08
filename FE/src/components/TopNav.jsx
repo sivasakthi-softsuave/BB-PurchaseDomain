@@ -1,5 +1,6 @@
 import { go } from "../lib/useHashRoute.js";
 import { IconFolder, IconGallery, IconHome, IconPlus } from "./Icons.jsx";
+import { NotificationBell } from "./NotificationBell.jsx";
 
 const ITEMS = [
   { tab: "home", label: "Home", Icon: IconHome },
@@ -12,7 +13,7 @@ const ITEMS = [
    there), so repeating the button on every screen just to leave it off one
    would be backwards; leaving it off Home specifically is the one exception
    asked for. */
-export function TopNav({ active, onAddProject }) {
+export function TopNav({ active, onAddProject, pendingScans, onSelectPendingScan }) {
   return (
     <div className="nav-rail">
       <nav className="nav" aria-label="Sections">
@@ -33,6 +34,8 @@ export function TopNav({ active, onAddProject }) {
         </div>
 
         <div className="spacer" />
+
+        <NotificationBell batches={pendingScans} onSelect={onSelectPendingScan} />
 
         {active !== "home" ? (
           <button className="btn btn-ink btn-sm" type="button" onClick={onAddProject}>

@@ -401,6 +401,14 @@ def row_to_document(row: sqlite3.Row) -> dict:
         # A MIN Voucher's or Purchase Bill's own reference back to the
         # invoice it belongs to — see po_reconciliation for how it's used.
         "dc_number": row["dc_number"],
+        # The decision (and any later correction) this document has been
+        # through — see po_reconciliation's Delivery Timeline, the one place
+        # that needs the full history rather than just the current status.
+        "reviewed_by": row["reviewed_by"],
+        "reviewed_at": row["reviewed_at"],
+        "edited_by": row["edited_by"],
+        "edited_at": row["edited_at"],
+        "rejection_reason": row["rejection_reason"],
     }
 
 
@@ -655,11 +663,14 @@ def insert_document(
     already has rendered page paths in hand — see store_batch_pages, used
     once the pages have been split into documents by content rather than by
     upload — doesn't have to re-derive this shape by hand."""
+    # A SCAN document starts hidden from every listing until the console
+    # decides Process or Draft for its batch — an UPLOAD never has that
+    # decision to make, so it's visible immediately, same as always.
     con.execute(
         "INSERT INTO documents (id, project_id, site_id, session_id, source, document_type,"
-        " file_paths, page_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        " file_paths, page_count, awaiting_scan_decision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (doc_id, project_id, site_id, session_id, source, document_type,
-         json.dumps(rel_paths), len(rel_paths)),
+         json.dumps(rel_paths), len(rel_paths), 1 if source == "SCAN" else 0),
     )
     return {
         "document_id": doc_id,
@@ -729,7 +740,6 @@ def queue_extraction(background: BackgroundTasks, documents: list[dict]) -> None
 
 @app.post("/api/v1/documents/batch-upload")
 def batch_upload(
-    background: BackgroundTasks,
     session_id: str = Depends(current_session),
     files: list[UploadFile] = File(...),
     page_counts: str = Form(...),
@@ -748,6 +758,10 @@ def batch_upload(
     example above would mean two documents, not three: parse_document_types
     ignores it entirely (falling back to UNCLASSIFIED for every document)
     unless its count matches exactly.
+
+    Unlike web_upload, this does not queue extraction — a scanned batch sits at
+    PENDING until the console decides, from the still-open Scan modal, whether
+    to Process it now or leave it as a draft (see process_batch below).
     """
     counts = parse_page_counts(page_counts, len(files))
     hints = parse_document_types(document_types, len(counts))
@@ -769,7 +783,6 @@ def batch_upload(
             document_type_hints=hints,
         )
 
-    queue_extraction(background, documents)
     return {"session_id": session_id, "total": len(documents), "documents": documents}
 
 
@@ -1038,7 +1051,8 @@ def clear_quote_pick(project_id: str, material_id: str):
 DOC_SELECT = """
 SELECT d.*, p.code AS project_code, p.name AS project_name,
        h.vendor_name_raw, h.vendor_gstin, h.vendor_id, h.doc_number, h.po_number, h.total_value,
-       h.min_number, h.dc_number
+       h.min_number, h.dc_number,
+       h.reviewed_by, h.reviewed_at, h.edited_by, h.edited_at, h.rejection_reason
   FROM documents d
   LEFT JOIN projects p    ON p.id = d.project_id
   LEFT JOIN doc_headers h ON h.document_id = d.id
@@ -1047,8 +1061,13 @@ SELECT d.*, p.code AS project_code, p.name AS project_name,
 
 @app.get("/api/v1/documents")
 def list_documents(session_id: str | None = None, project_id: str | None = None,
-                   status: str | None = None, limit: int = 100):
-    where, args = [], []
+                   status: str | None = None, awaiting_decision: bool = False, limit: int = 100):
+    """awaiting_decision=False (the default, for every caller except the Scan
+    modal's own poll) excludes a scanned batch the console hasn't yet chosen
+    Process or Draft for — it isn't merely unprocessed, it isn't listed at
+    all. Passing true flips that around, for exactly the one screen that
+    needs to find those batches in order to offer the decision."""
+    where, args = ["d.awaiting_scan_decision = ?"], [1 if awaiting_decision else 0]
     if session_id:
         where.append("d.session_id = ?")
         args.append(session_id)
@@ -1080,12 +1099,21 @@ def get_document(document_id: str):
         lines = con.execute(
             "SELECT * FROM doc_lines WHERE document_id = ? ORDER BY line_no", (document_id,)
         ).fetchall()
+        edits = con.execute(
+            "SELECT edited_by, edited_at FROM document_edits WHERE document_id = ? ORDER BY id",
+            (document_id,),
+        ).fetchall()
 
     header_dict = dict(header) if header else None
     if header_dict:
         header_dict["vendor_gstin_checksum_ok"] = extract.gstin_checksum_ok(header_dict.get("vendor_gstin"))
         header_dict["buyer_gstin_checksum_ok"] = extract.gstin_checksum_ok(header_dict.get("buyer_gstin"))
         header_dict["vendor_gstin_is_self"] = extract.gstin_is_self(header_dict.get("vendor_gstin"))
+        # The full edit sequence — see document_edits in db.py — for
+        # DocumentTimeline. Falls back to nothing here; the FE fills in the
+        # single edited_by/edited_at pair itself for a document edited
+        # before this table existed.
+        header_dict["edit_history"] = [dict(e) for e in edits]
 
     return row_to_document(row) | {
         "header": header_dict,
@@ -1105,13 +1133,34 @@ def delete_document(document_id: str):
     now-unpaired copy is left alone; its own duplicate-diff banner just goes
     back to showing nothing, same as any invoice with no matching copy.
 
+    A document that fed into a PO's Delivery Timeline (INVOICE/DELIVERY/
+    INWARD/PURCHASE_BILL) gets one row logged to deleted_documents first —
+    see db.py's SCHEMA — so po_reconciliation can still say "<type> deleted
+    — <time>" for it. Everything else (a PO, OTHER, UNCLASSIFIED) never
+    entered that timeline in the first place, so nothing is logged for it.
+
     Scanned image files on disk are removed too, best-effort — a failure to
     unlink one (already gone, permissions) doesn't block the delete."""
     with db.db() as con:
-        row = con.execute("SELECT file_paths FROM documents WHERE id = ?", (document_id,)).fetchone()
+        row = con.execute(DOC_SELECT + " WHERE d.id = ?", (document_id,)).fetchone()
         if row is None:
             raise HTTPException(404, "No such document")
         file_paths = json.loads(row["file_paths"])
+
+        if row["document_type"] in ("INVOICE", "DELIVERY", "INWARD", "PURCHASE_BILL"):
+            con.execute(
+                "INSERT INTO deleted_documents"
+                " (document_id, project_id, document_type, doc_number, po_number, dc_number,"
+                "  vendor_id, vendor_name, uploaded_at, reviewed_by, reviewed_at,"
+                "  edited_by, edited_at, rejection_reason, deleted_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (document_id, row["project_id"], row["document_type"], row["doc_number"],
+                 row["po_number"], row["dc_number"], row["vendor_id"], row["vendor_name_raw"],
+                 row["uploaded_at"], row["reviewed_by"], row["reviewed_at"],
+                 row["edited_by"], row["edited_at"], row["rejection_reason"],
+                 datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            )
+
         con.execute("UPDATE documents SET duplicate_of = NULL WHERE duplicate_of = ?", (document_id,))
         con.execute("DELETE FROM doc_lines WHERE document_id = ?", (document_id,))
         con.execute("DELETE FROM doc_headers WHERE document_id = ?", (document_id,))
@@ -1261,6 +1310,22 @@ def duplicate_diff(document_id: str):
     return diff | {"duplicate_of": other_id, "other_document": dict(other) if other else None}
 
 
+def _parse_ts(stamp: str | None) -> datetime | None:
+    """uploaded_at ("2026-09-26 11:51:27") is genuinely UTC but carries no
+    offset of its own, unlike reviewed_at/edited_at/deleted_at ("...T11:51:
+    39+00:00") — comparing the two needs both normalised onto the same
+    footing, same reasoning as the FE's own toMs in ComparePage.jsx."""
+    if not stamp:
+        return None
+    s = stamp.replace(" ", "T")
+    if "+" not in s and not s.endswith("Z"):
+        s += "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
 @app.get("/api/v1/documents/{po_document_id}/reconciliation")
 def po_reconciliation(po_document_id: str):
     """For a PO document: every invoice, MIN Voucher and Purchase Bill that
@@ -1387,6 +1452,100 @@ def po_reconciliation(po_document_id: str):
                     groups.setdefault(key, new_group(key[1], d["vendor_name"]))
                 groups[key][slot].append(d)
 
+        # A document deleted out of a delivery that still has at least one
+        # other live document (see delete_document's deleted_documents log)
+        # is placed back into that same group — same key logic as above,
+        # just never touching g["invoices"]/g["notes"]/g["inward"]/
+        # g["purchase_bills"], since a deleted document has no lines left to
+        # feed the three-way match. It only ever contributes its own
+        # deleted-event entry to that group's final documents list, below.
+        #
+        # A delivery removed entirely (every one of its documents deleted —
+        # eg. the Delivery info tab's own "Delete all") gets no group of its
+        # own here: `key in groups` is false once nothing live remains under
+        # it, and that delivery goes back to simply not existing, the same
+        # as before this history existed. Manufacturing a group just to hold
+        # its deleted-event history would undo the one thing "Delete all"
+        # is actually for — removing the delivery, not just its documents —
+        # so it would keep showing in both the Delivery info list/count and
+        # the Timeline after being deleted.
+        #
+        # Re-uploading the same invoice number afterward makes `key in
+        # groups` true again, on a brand new delivery that happens to share
+        # the old one's identity — its own history has to start clean, not
+        # inherit whatever was deleted the last time this same number was
+        # used. A deletion only belongs to the *current* delivery if it
+        # happened after that delivery's own earliest live document was
+        # captured; anything deleted before that predates this incarnation
+        # entirely and is dropped.
+        min_live_uploaded_at: dict[tuple, datetime] = {}
+        for key, g in groups.items():
+            times = [
+                t for t in (
+                    _parse_ts(doc["uploaded_at"])
+                    for doc in g["invoices"] + g["notes"] + g["inward"] + g["purchase_bills"]
+                ) if t is not None
+            ]
+            if times:
+                min_live_uploaded_at[key] = min(times)
+
+        deleted_rows = con.execute(
+            "SELECT * FROM deleted_documents"
+            " WHERE project_id = ? AND po_number = ?"
+            " AND document_type IN ('INVOICE', 'DELIVERY', 'INWARD', 'PURCHASE_BILL')",
+            (po_row["project_id"], po_row["doc_number"]),
+        ).fetchall()
+
+        # Every edit ever made to any document (live or since deleted) this
+        # PO's Delivery Timeline could show — fetched once for all of them
+        # rather than once per document, then handed to _doc_row below and
+        # to the deleted-document rows just after. See document_edits in
+        # db.py: doc_headers.edited_by/edited_at only ever hold the latest
+        # one, which used to make editing a document twice look like one
+        # edit whose time kept moving.
+        all_doc_ids = {
+            d["document_id"]
+            for g in groups.values()
+            for d in g["invoices"] + g["notes"] + g["inward"] + g["purchase_bills"]
+        } | {d["document_id"] for d in deleted_rows}
+        edits_by_doc: dict[str, list[dict]] = {}
+        if all_doc_ids:
+            placeholders = ",".join("?" * len(all_doc_ids))
+            for r in con.execute(
+                f"SELECT document_id, edited_by, edited_at FROM document_edits"
+                f" WHERE document_id IN ({placeholders}) ORDER BY id",
+                tuple(all_doc_ids),
+            ):
+                edits_by_doc.setdefault(r["document_id"], []).append(
+                    {"edited_by": r["edited_by"], "edited_at": r["edited_at"]}
+                )
+
+        deleted_by_key: dict[tuple, list[dict]] = {}
+        for d in deleted_rows:
+            doc_type = d["document_type"]
+            if doc_type == "INVOICE":
+                key = (d["vendor_id"] or "", d["doc_number"] or d["document_id"])
+            elif doc_type == "DELIVERY":
+                key = dc_to_key.get(d["doc_number"]) or (d["vendor_id"] or "", d["doc_number"] or d["document_id"])
+            else:  # INWARD, PURCHASE_BILL
+                key = invoice_number_to_key.get(d["dc_number"]) \
+                    or (d["vendor_id"] or "", d["dc_number"] or d["doc_number"] or d["document_id"])
+            if key not in groups:
+                continue
+            min_live = min_live_uploaded_at.get(key)
+            deleted_at = _parse_ts(d["deleted_at"])
+            if min_live is not None and deleted_at is not None and deleted_at <= min_live:
+                continue
+            deleted_by_key.setdefault(key, []).append({
+                "document_id": d["document_id"], "document_type": doc_type,
+                "doc_number": d["doc_number"], "total_value": None, "page_count": None,
+                "status": "DELETED", "uploaded_at": d["uploaded_at"],
+                "reviewed_by": d["reviewed_by"], "reviewed_at": d["reviewed_at"],
+                "edited_by": d["edited_by"], "edited_at": d["edited_at"],
+                "edit_history": edits_by_doc.get(d["document_id"], []),
+                "rejection_reason": d["rejection_reason"], "deleted_at": d["deleted_at"],
+            })
+
         # A MIN Voucher's comparable quantity is what it actually accepted,
         # not what it was offered — see doc_lines.accept_qty in db.py. Falls
         # back to quantity when accept_qty isn't set (an older record, or a
@@ -1402,7 +1561,7 @@ def po_reconciliation(po_document_id: str):
         deliveries = []
         delivered_by_material: dict[str, dict] = {}
         pending_by_material: dict[str, dict] = {}
-        for g in groups.values():
+        for key, g in groups.items():
             g["invoices"].sort(key=lambda d: d["uploaded_at"])
             g["notes"].sort(key=lambda d: d["uploaded_at"])
             g["inward"].sort(key=lambda d: d["uploaded_at"])
@@ -1519,37 +1678,40 @@ def po_reconciliation(po_document_id: str):
             # info list reads as its own document, not just a bare date — a
             # MIN Voucher or Purchase Bill carries its own number, different
             # from the invoice number the whole group is named after, and
-            # there's otherwise nothing on the row to say so.
-            documents = [
-                {"document_id": d["document_id"], "document_type": "INVOICE",
-                 "doc_number": d["doc_number"], "total_value": d["total_value"],
-                 "page_count": d["page_count"],
-                 "status": d["status"], "uploaded_at": d["uploaded_at"]}
-                for d in g["invoices"]
-            ] + [
-                {"document_id": d["document_id"], "document_type": "DELIVERY",
-                 "doc_number": d["doc_number"], "total_value": d["total_value"],
-                 "page_count": d["page_count"],
-                 "status": d["status"], "uploaded_at": d["uploaded_at"]}
-                for d in g["notes"]
-            ] + [
-                {"document_id": d["document_id"], "document_type": "INWARD",
-                 "doc_number": d["doc_number"], "total_value": d["total_value"],
-                 "page_count": d["page_count"],
-                 "status": d["status"], "uploaded_at": d["uploaded_at"]}
-                for d in g["inward"]
-            ] + [
-                {"document_id": d["document_id"], "document_type": "PURCHASE_BILL",
-                 "doc_number": d["doc_number"], "total_value": d["total_value"],
-                 "page_count": d["page_count"],
-                 "status": d["status"], "uploaded_at": d["uploaded_at"]}
-                for d in g["purchase_bills"]
-            ]
+            # there's otherwise nothing on the row to say so. reviewed_by/
+            # reviewed_at/edited_by/edited_at/rejection_reason ride along too
+            # — the Delivery Timeline builds each document's own event
+            # history (captured, approved/rejected, edited) from these.
+            def _doc_row(d, doc_type):
+                return {
+                    "document_id": d["document_id"], "document_type": doc_type,
+                    "doc_number": d["doc_number"], "total_value": d["total_value"],
+                    "page_count": d["page_count"],
+                    "status": d["status"], "uploaded_at": d["uploaded_at"],
+                    "reviewed_by": d["reviewed_by"], "reviewed_at": d["reviewed_at"],
+                    "edited_by": d["edited_by"], "edited_at": d["edited_at"],
+                    "edit_history": edits_by_doc.get(d["document_id"], []),
+                    "rejection_reason": d["rejection_reason"],
+                }
+
+            documents = (
+                [_doc_row(d, "INVOICE") for d in g["invoices"]]
+                + [_doc_row(d, "DELIVERY") for d in g["notes"]]
+                + [_doc_row(d, "INWARD") for d in g["inward"]]
+                + [_doc_row(d, "PURCHASE_BILL") for d in g["purchase_bills"]]
+            )
 
             deliveries.append({
                 "doc_number": g["doc_number"],
                 "vendor_name": g["vendor_name"],
                 "documents": documents,
+                # Already-deleted documents this same delivery once had — see
+                # deleted_by_key above. Kept out of "documents" itself, which
+                # the Delivery info tab's own row list still renders as
+                # clickable documents — a deleted one has nothing left to
+                # open. Only the Delivery Timeline reads this, folding it in
+                # alongside "documents" to build each event's own history.
+                "deleted_documents": deleted_by_key.get(key, []),
                 "missing": missing,
                 "verification": verification,
                 # Kept for the FE's existing "Mismatch" pill — true only for
@@ -1728,23 +1890,77 @@ def reextract(document_id: str, background: BackgroundTasks):
     return {"document_id": document_id, "status": "PROCESSING"}
 
 
+def _confirm_scan_batch(document_ids: list[str]) -> None:
+    """Clears awaiting_scan_decision — the batch stops being invisible and
+    becomes an ordinary document, whichever of Process/Draft was chosen."""
+    with db.db() as con:
+        placeholders = ",".join("?" * len(document_ids))
+        con.execute(
+            f"UPDATE documents SET awaiting_scan_decision = 0 WHERE id IN ({placeholders})",
+            document_ids,
+        )
+
+
+@app.post("/api/v1/documents/process-batch")
+def process_batch(background: BackgroundTasks, body: dict):
+    """The console's "Process" choice for a batch the phone just scanned in —
+    the explicit decision that replaces batch_upload's old auto-extract.
+    Confirms the batch (see _confirm_scan_batch) and runs the same
+    _extract_all as any other batch, reconcile_batch included, just
+    triggered by a click instead of by the upload itself."""
+    document_ids = (body or {}).get("document_ids") or []
+    if not document_ids:
+        raise HTTPException(400, "document_ids required")
+    _confirm_scan_batch(document_ids)
+    background.add_task(_extract_all, document_ids)
+    return {"document_ids": document_ids, "status": "PROCESSING"}
+
+
+@app.post("/api/v1/documents/draft-batch")
+def draft_batch(body: dict):
+    """The console's "Draft" choice — confirms the batch (see
+    _confirm_scan_batch) and parks it at DRAFT instead of PENDING, so it
+    never looks like it's queued for extraction and never gets any."""
+    document_ids = (body or {}).get("document_ids") or []
+    if not document_ids:
+        raise HTTPException(400, "document_ids required")
+    _confirm_scan_batch(document_ids)
+    with db.db() as con:
+        placeholders = ",".join("?" * len(document_ids))
+        con.execute(
+            f"UPDATE documents SET status = 'DRAFT' WHERE id IN ({placeholders})",
+            document_ids,
+        )
+    return {"document_ids": document_ids, "status": "DRAFT"}
+
+
 @app.put("/api/v1/documents/{document_id}")
 def update_document(document_id: str, body: dict):
     """Save reviewer corrections to the extracted header/line fields.
 
     This only saves — it doesn't decide anything. A document can be edited
-    any number of times while it sits at EXTRACTED; editing is blocked once a
-    decision (approve/reject) has been made, since that decision was made
-    against a specific set of values.
+    any number of times while it sits at EXTRACTED; editing is blocked once
+    it's REJECTED, since that decision was made against a specific set of
+    values.
+
+    APPROVED is the one exception: a reviewer can reopen an approved
+    document to fix something noticed later (the pencil-edit toggle in
+    ReviewModal). It's saved in place — the document stays APPROVED rather
+    than reverting to EXTRACTED — and `edited_by`, if given, records who
+    made the change onto edited_by/edited_at, a separate pair of columns
+    from reviewed_by/reviewed_at so the original approval record is never
+    overwritten.
     """
     with db.db() as con:
+        status_row = con.execute(
+            "SELECT status FROM documents WHERE id = ?", (document_id,)
+        ).fetchone()
+        if status_row is None:
+            raise HTTPException(404, "No such document")
+        was_approved = status_row["status"] == "APPROVED"
+
         if not extract.claim_for_edit(con, document_id):
-            row = con.execute(
-                "SELECT status FROM documents WHERE id = ?", (document_id,)
-            ).fetchone()
-            if row is None:
-                raise HTTPException(404, "No such document")
-            raise HTTPException(409, f"Document is {row['status']} — cannot edit")
+            raise HTTPException(409, f"Document is {status_row['status']} — cannot edit")
 
         try:
             extract.apply_edits(
@@ -1753,6 +1969,23 @@ def update_document(document_id: str, body: dict):
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc))
+
+        if was_approved:
+            edited_by = str((body or {}).get("edited_by", "")).strip()
+            if edited_by:
+                edited_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                con.execute(
+                    "UPDATE doc_headers SET edited_by = ?, edited_at = ? WHERE document_id = ?",
+                    (edited_by, edited_at, document_id),
+                )
+                # The full sequence of edits, not just the latest one — see
+                # document_edits in db.py. Editing the same approved document
+                # a second time must add a second Timeline event, not just
+                # move the first one's timestamp.
+                con.execute(
+                    "INSERT INTO document_edits (document_id, edited_by, edited_at) VALUES (?, ?, ?)",
+                    (document_id, edited_by, edited_at),
+                )
 
     return get_document(document_id)
 

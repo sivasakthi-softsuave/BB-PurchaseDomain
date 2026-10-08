@@ -1,3 +1,4 @@
+import { DropdownSelect } from "./DropdownSelect.jsx";
 import { DOC_STATUSES, DOC_TYPES, docTypeLabel } from "../lib/format.js";
 
 const title = (s) => { const w = s.replace(/_/g, " "); return w.charAt(0) + w.slice(1).toLowerCase(); };
@@ -10,6 +11,7 @@ export function FilterBar({
   projects = null,   // pass a project list to show the project select
   dates = false,
   placeholder = "Search document ID or project…",
+  actions = null,    // extra controls (e.g. bulk Process/Delete) on the same line as the filters
 }) {
   const set = (patch) => onChange({ ...value, ...patch });
 
@@ -25,36 +27,39 @@ export function FilterBar({
       />
 
       {projects ? (
-        <select
-          className="input"
+        <DropdownSelect
+          className="filter-bar-combo"
+          ariaLabel="Filter by project"
           value={value.project ?? ""}
-          aria-label="Filter by project"
-          onChange={(e) => set({ project: e.target.value })}
-        >
-          <option value="">All projects</option>
-          {projects.map((p) => <option key={p.id} value={p.id}>{p.code}</option>)}
-        </select>
+          onChange={(v) => set({ project: v })}
+          options={[
+            { value: "", label: "All projects" },
+            ...projects.map((p) => ({ value: p.id, label: p.code })),
+          ]}
+        />
       ) : null}
 
-      <select
-        className="input"
+      <DropdownSelect
+        className="filter-bar-combo"
+        ariaLabel="Filter by document type"
         value={value.type ?? ""}
-        aria-label="Filter by document type"
-        onChange={(e) => set({ type: e.target.value })}
-      >
-        <option value="">All types</option>
-        {DOC_TYPES.map((t) => <option key={t} value={t}>{docTypeLabel(t)}</option>)}
-      </select>
+        onChange={(v) => set({ type: v })}
+        options={[
+          { value: "", label: "All types" },
+          ...DOC_TYPES.map((t) => ({ value: t, label: docTypeLabel(t) })),
+        ]}
+      />
 
-      <select
-        className="input"
+      <DropdownSelect
+        className="filter-bar-combo"
+        ariaLabel="Filter by status"
         value={value.status ?? ""}
-        aria-label="Filter by status"
-        onChange={(e) => set({ status: e.target.value })}
-      >
-        <option value="">All statuses</option>
-        {DOC_STATUSES.map((s) => <option key={s} value={s}>{title(s)}</option>)}
-      </select>
+        onChange={(v) => set({ status: v })}
+        options={[
+          { value: "", label: "All statuses" },
+          ...DOC_STATUSES.map((s) => ({ value: s, label: title(s) })),
+        ]}
+      />
 
       {dates ? (
         <>
@@ -78,6 +83,8 @@ export function FilterBar({
           </label>
         </>
       ) : null}
+
+      {actions ? <div className="filter-bar-actions">{actions}</div> : null}
     </div>
   );
 }

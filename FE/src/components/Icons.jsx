@@ -231,3 +231,16 @@ export const IconAlertTriangle = (p) => (
     <path d="M12 4l9.5 16H2.5z" /><path d="M12 10v4" /><path d="M12 17.5h.01" />
   </svg>
 );
+
+export const IconEdit = (p) => (
+  <svg {...base} {...p}>
+    <path d="M4 20l1-4.5L15.5 5 19 8.5 8.5 19z" /><path d="M13.5 6.5L17.5 10.5" />
+  </svg>
+);
+
+export const IconBell = (p) => (
+  <svg {...base} {...p}>
+    <path d="M6 9a6 6 0 0 1 12 0c0 4 1.5 5.5 2 6H4c.5-.5 2-2 2-6z" />
+    <path d="M10 19a2 2 0 0 0 4 0" />
+  </svg>
+);

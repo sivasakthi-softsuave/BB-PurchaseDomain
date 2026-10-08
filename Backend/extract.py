@@ -1904,12 +1904,21 @@ def apply_edits(con: sqlite3.Connection, document_id: str, header: dict, lines: 
 
 
 def claim_for_edit(con: sqlite3.Connection, document_id: str) -> bool:
-    """Atomically confirms the document is still EXTRACTED right before
-    applying reviewer edits — a value-preserving UPDATE used purely to take
-    SQLite's write lock conditionally, so an edit can't land on a document a
-    concurrent request just approved or rejected."""
+    """Atomically confirms the document is still EXTRACTED, or already
+    APPROVED, right before applying reviewer edits — a value-preserving
+    UPDATE used purely to take SQLite's write lock conditionally, so an edit
+    can't land on a document a concurrent request just rejected (or just
+    approved, for the EXTRACTED case).
+
+    APPROVED is allowed back in here for the one flow that needs it — a
+    reviewer reopening an already-approved document to fix a value noticed
+    later (see the pencil-edit toggle in ReviewModal). It stays APPROVED
+    (this doesn't move it back to EXTRACTED); update_document records who
+    made the change. REJECTED is not included: that flow has no equivalent
+    reopen-and-fix path."""
     cur = con.execute(
-        "UPDATE documents SET status = 'EXTRACTED' WHERE id = ? AND status = 'EXTRACTED'",
+        "UPDATE documents SET status = status"
+        " WHERE id = ? AND status IN ('EXTRACTED', 'APPROVED')",
         (document_id,),
     )
     return cur.rowcount > 0

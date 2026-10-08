@@ -108,6 +108,13 @@ CREATE TABLE IF NOT EXISTS documents (
   site_id        TEXT REFERENCES sites(id),
   session_id     TEXT REFERENCES scanner_sessions(id),
   source         TEXT NOT NULL CHECK (source IN ('SCAN','UPLOAD')),
+  -- Set on insert for a SCAN document, cleared the moment the console picks
+  -- Process or Draft for the batch it arrived in (see process_batch /
+  -- draft_batch in main.py). Every listing filters this out by default, so a
+  -- scanned batch the office hasn't looked at yet stays invisible — not
+  -- merely unprocessed — until that decision is made. Always 0 for UPLOAD,
+  -- which never has anything to decide.
+  awaiting_scan_decision INTEGER NOT NULL DEFAULT 0,
 
   document_type  TEXT NOT NULL DEFAULT 'UNCLASSIFIED'
                  CHECK (document_type IN
@@ -118,7 +125,7 @@ CREATE TABLE IF NOT EXISTS documents (
   is_handwritten INTEGER NOT NULL DEFAULT 0,
 
   status         TEXT NOT NULL DEFAULT 'PENDING'
-                 CHECK (status IN ('PENDING','PROCESSING','EXTRACTED','APPROVED','REJECTED','FAILED')),
+                 CHECK (status IN ('DRAFT','PENDING','PROCESSING','EXTRACTED','APPROVED','REJECTED','FAILED')),
   extracted_json TEXT,
   duplicate_of   TEXT REFERENCES documents(id),
   error          TEXT,
@@ -179,6 +186,12 @@ CREATE TABLE IF NOT EXISTS doc_headers (
   reviewed_by       TEXT,
   reviewed_at       TEXT,
   rejection_reason  TEXT,
+  -- Set only when an already-APPROVED document is reopened and saved again
+  -- (the pencil-edit toggle in ReviewModal) — who touched it and when,
+  -- kept separate from reviewed_by/reviewed_at so the original approval
+  -- itself is never overwritten.
+  edited_by         TEXT,
+  edited_at         TEXT,
 
   -- Set only when extract.reconcile_batch silently overwrote a field this
   -- document's own extraction misread — a reference number two sibling
@@ -275,12 +288,56 @@ CREATE TABLE IF NOT EXISTS quote_picks (
   PRIMARY KEY (project_id, material_id)
 );
 
+-- A document (INVOICE/DELIVERY/INWARD/PURCHASE_BILL) is gone once deleted —
+-- documents/doc_headers/doc_lines really are removed, on purpose (see
+-- delete_document in main.py) — but po_reconciliation's Delivery Timeline
+-- still needs to say "<type> deleted — <time>" for it, including for a
+-- delivery every one of whose documents has since been removed. This is a
+-- one-way audit trail, not a soft-delete: nothing here is ever read back
+-- into a live document, only folded into a Delivery Timeline entry by
+-- po_number/doc_number/dc_number the same way a live document would be
+-- grouped. No foreign keys — document_id it names is already gone by the
+-- time this row is written.
+CREATE TABLE IF NOT EXISTS deleted_documents (
+  id               INTEGER PRIMARY KEY,
+  document_id      TEXT NOT NULL,
+  project_id       TEXT,
+  document_type    TEXT,
+  doc_number       TEXT,
+  po_number        TEXT,
+  dc_number        TEXT,
+  vendor_id        TEXT,
+  vendor_name      TEXT,
+  uploaded_at      TEXT,
+  reviewed_by      TEXT,
+  reviewed_at      TEXT,
+  edited_by        TEXT,
+  edited_at        TEXT,
+  rejection_reason TEXT,
+  deleted_at       TEXT NOT NULL
+);
+
+-- Every "edit an approved document" decision (see update_document in
+-- main.py) gets its own row here. doc_headers.edited_by/edited_at still
+-- hold only the *latest* one — every other reader of "who last touched
+-- this" keeps working unchanged — but the Delivery/Document Timeline reads
+-- this table instead, so editing the same document twice adds a second
+-- event rather than just moving the first one's timestamp.
+CREATE TABLE IF NOT EXISTS document_edits (
+  id          INTEGER PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES documents(id),
+  edited_by   TEXT NOT NULL,
+  edited_at   TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS ix_headers_date ON doc_headers(doc_date);
 CREATE INDEX IF NOT EXISTS ix_documents_project ON documents(project_id);
 CREATE INDEX IF NOT EXISTS ix_sites_project ON sites(project_id);
 CREATE INDEX IF NOT EXISTS ix_quotations_project ON quotations(project_id);
 CREATE INDEX IF NOT EXISTS ix_quotation_lines_quotation ON quotation_lines(quotation_id);
 CREATE INDEX IF NOT EXISTS ix_quote_picks_project ON quote_picks(project_id);
+CREATE INDEX IF NOT EXISTS ix_deleted_documents_po ON deleted_documents(project_id, po_number);
+CREATE INDEX IF NOT EXISTS ix_document_edits_doc ON document_edits(document_id);
 """
 
 
@@ -355,11 +412,14 @@ _MIGRATIONS = {
         ("extracted_json", "TEXT"),
         ("duplicate_of", "TEXT REFERENCES documents(id)"),
         ("error", "TEXT"),
+        ("awaiting_scan_decision", "INTEGER NOT NULL DEFAULT 0"),
     ],
     "doc_headers": [
         ("min_number", "TEXT"),
         ("vehicle_number", "TEXT"),
         ("correction_note", "TEXT"),
+        ("edited_by", "TEXT"),
+        ("edited_at", "TEXT"),
     ],
     "doc_lines": [
         ("accept_qty", "REAL"),
@@ -405,12 +465,13 @@ _DOCUMENT_COLUMNS = (
 
 def migrate_document_type_check(con: sqlite3.Connection) -> None:
     """SQLite can't ALTER a CHECK constraint — adding a new valid
-    document_type needs the table rebuilt. Idempotent: a no-op once the
-    table's own stored CREATE TABLE text already allows every type DOC_TYPES
-    lists (checked via the newest one added, 'PURCHASE_BILL', so a database
-    that already has 'INWARD' but predates 'PURCHASE_BILL' still gets
-    rebuilt once more). Must run after migrate() — depends on every column
-    above already existing under its real name.
+    document_type or status needs the table rebuilt. Idempotent: a no-op once
+    the table's own stored CREATE TABLE text already allows every type
+    DOC_TYPES lists and every status the app uses (checked via the newest
+    ones added, 'PURCHASE_BILL' and 'DRAFT', so a database that already has
+    one but predates the other still gets rebuilt once more). Must run after
+    migrate() — depends on every column above already existing under its
+    real name.
 
     Builds the replacement under a temporary name, copies into it, drops the
     original, then renames the temp table into place — deliberately not the
@@ -425,7 +486,7 @@ def migrate_document_type_check(con: sqlite3.Connection) -> None:
     row = con.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents'"
     ).fetchone()
-    if row is None or "PURCHASE_BILL" in row["sql"]:
+    if row is None or ("PURCHASE_BILL" in row["sql"] and "DRAFT" in row["sql"]):
         return
 
     cols = ", ".join(_DOCUMENT_COLUMNS)
@@ -446,7 +507,7 @@ def migrate_document_type_check(con: sqlite3.Connection) -> None:
           is_handwritten INTEGER NOT NULL DEFAULT 0,
           status         TEXT NOT NULL DEFAULT 'PENDING'
                          CHECK (status IN
-                           ('PENDING','PROCESSING','EXTRACTED','APPROVED','REJECTED','FAILED')),
+                           ('DRAFT','PENDING','PROCESSING','EXTRACTED','APPROVED','REJECTED','FAILED')),
           extracted_json TEXT,
           duplicate_of   TEXT REFERENCES documents(id),
           error          TEXT,

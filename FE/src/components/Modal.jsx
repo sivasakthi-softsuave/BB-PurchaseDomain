@@ -14,6 +14,7 @@ import { IconClose } from "./Icons.jsx";
    of that gate. */
 export function Modal({
   title, subtitle, wide = false, closable = true, glacier = false, maxWidth, onClose, children, footer,
+  headerExtra,
 }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape" && closable) onClose(); };
@@ -39,6 +40,7 @@ export function Modal({
             {subtitle ? <div className="for">{subtitle}</div> : null}
           </div>
           <div className="spacer" />
+          {headerExtra}
           <button
             className="close-x"
             onClick={onClose}

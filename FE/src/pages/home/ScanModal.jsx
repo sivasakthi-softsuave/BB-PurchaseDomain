@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Modal } from "../../components/Modal.jsx";
 import { IconRefresh } from "../../components/Icons.jsx";
+import { IncomingBatchModal } from "../../features/review/IncomingBatchModal.jsx";
 import { api } from "../../lib/api.js";
 
 function useCountdown(expiresAt) {
@@ -20,16 +21,29 @@ function useCountdown(expiresAt) {
 
 /* The QR carries the server address and a signed, expiring session token, so a
    phone that scans it is already bound to this project — it never has to pick
-   one. The session is minted on open; "New code" mints another. */
-export function ScanModal({ project, onClose }) {
+   one. The session is minted on open; "New code" mints another.
+
+   Scanned batches land hidden — awaiting_scan_decision — without
+   auto-extracting (see batch_upload in Backend/main.py). Nothing about them
+   is visible anywhere in the console, Documents included, until this modal's
+   poll finds them and the office picks Process (read them now) or Draft
+   (file them away unread) — closing without deciding just leaves that batch
+   invisible; reopening this modal mints a new session and won't offer it
+   again. handledIds is local-only, to stop an already-decided batch from
+   reappearing between polls while its still-PENDING status catches up. */
+export function ScanModal({ project, onClose, onProcess, onDraft }) {
   const [session, setSession] = useState(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [incoming, setIncoming] = useState([]);
+  const handledIds = useRef(new Set());
   const left = useCountdown(session?.expires_at);
 
   const mint = useCallback(async () => {
     setBusy(true);
     setErr("");
+    handledIds.current = new Set();
+    setIncoming([]);
     try {
       setSession(await api.createSession(project.id));
     } catch (e) {
@@ -41,11 +55,51 @@ export function ScanModal({ project, onClose }) {
 
   useEffect(() => { mint(); }, [mint]);
 
+  useEffect(() => {
+    const sessionId = session?.session_id;
+    if (!sessionId) return;
+    let cancelled = false;
+    let timer = null;
+
+    const poll = async () => {
+      try {
+        const docs = await api.listDocuments({ session_id: sessionId, awaiting_decision: true });
+        if (!cancelled) setIncoming(docs.filter((d) => !handledIds.current.has(d.document_id)));
+      } catch {
+        // transient — the next tick tries again
+      }
+      if (!cancelled) timer = setTimeout(poll, 3000);
+    };
+
+    poll();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [session?.session_id]);
+
+  // IncomingBatchModal already confirmed the batch server-side (clearing
+  // awaiting_scan_decision) by the time either callback fires — ids only
+  // join handledIds once that's succeeded, so a failed request leaves the
+  // prompt in place to retry rather than silently dropping the batch.
+  const markHandled = (ids) => {
+    ids.forEach((id) => handledIds.current.add(id));
+    setIncoming([]);
+  };
+
   const expired = left === 0;
   const clock =
     left == null
       ? "—"
       : `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}`;
+
+  if (incoming.length > 0) {
+    return (
+      <IncomingBatchModal
+        documents={incoming}
+        onClose={onClose}
+        onProcess={(ids) => { markHandled(ids); onProcess?.(ids); }}
+        onDraft={(ids) => { markHandled(ids); onDraft?.(ids); }}
+      />
+    );
+  }
 
   return (
     <Modal

@@ -11,14 +11,21 @@ import { ScanModal } from "./pages/home/ScanModal.jsx";
 import { AddProjectModal } from "./pages/home/AddProjectModal.jsx";
 import { ReviewModal } from "./features/review/ReviewModal.jsx";
 import { BatchSummaryModal } from "./features/review/BatchSummaryModal.jsx";
+import { IncomingBatchModal } from "./features/review/IncomingBatchModal.jsx";
 import { useConsoleData } from "./lib/useConsoleData.js";
 import { useHashRoute } from "./lib/useHashRoute.js";
+import { usePendingScans } from "./lib/usePendingScans.js";
 
 /* Shell and routing only. Each tab owns its own filters; the shared data comes
    from one hook so all three read the same lists. */
 export default function App() {
   const { tab, projectId, documentId } = useHashRoute();
   const { projects, docs, materials, reload, updatedAt } = useConsoleData();
+  const { batches: pendingScans, refresh: refreshPendingScans } = usePendingScans();
+  // A batch opened from the notification bell — independent of scanFor/
+  // ScanModal, since the phone connection that produced it may be long
+  // closed by the time the office gets back to deciding it.
+  const [openPendingBatch, setOpenPendingBatch] = useState(null);
 
   /* Reachable from every tab, so they live up here rather than in one of them. */
   const [reviewId, setReviewId] = useState(null);
@@ -82,6 +89,8 @@ export default function App() {
       <TopNav
         active={tab}
         onAddProject={() => setAddingProject(true)}
+        pendingScans={pendingScans}
+        onSelectPendingScan={setOpenPendingBatch}
       />
 
       <main id={`tab-${tab}`}>
@@ -107,6 +116,7 @@ export default function App() {
             onAddProject={() => setAddingProject(true)}
             onAddDocument={setUploadFor}
             onScan={setScanFor}
+            onProcessed={setBatchIds}
           />
         ) : null}
 
@@ -169,7 +179,28 @@ export default function App() {
       {/* Same QR-connect flow as the home tiles — reused rather than
           duplicated — reachable from the projects grid and a project's own
           page too, not just home. */}
-      {scanFor ? <ScanModal project={scanFor} onClose={() => setScanFor(null)} /> : null}
+      {scanFor ? (
+        <ScanModal
+          project={scanFor}
+          onClose={() => setScanFor(null)}
+          onProcess={(ids) => { setScanFor(null); reload(); refreshPendingScans(); setBatchIds(ids); }}
+          onDraft={() => { reload(); refreshPendingScans(); }}
+        />
+      ) : null}
+
+      {/* Reopened from the notification bell for a batch left undecided
+          after its own Scan modal was closed — same decision, same
+          component, just no QR/session screen behind it here. */}
+      {openPendingBatch ? (
+        <IncomingBatchModal
+          documents={openPendingBatch.documents}
+          onClose={() => setOpenPendingBatch(null)}
+          onProcess={(ids) => {
+            setOpenPendingBatch(null); reload(); refreshPendingScans(); setBatchIds(ids);
+          }}
+          onDraft={() => { setOpenPendingBatch(null); reload(); refreshPendingScans(); }}
+        />
+      ) : null}
 
       {/* Shell-level like the modals: a question outlives a tab switch. */}
       <ChatDock />

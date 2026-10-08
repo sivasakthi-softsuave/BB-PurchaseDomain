@@ -222,13 +222,19 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
 /* ── status: filled = state, outlined = kind ──────────────────────────────
    Colour belongs to status alone, because status is what you scan a list
    for. Document type is metadata and stays quiet. */
+/* inline-block, not inline-flex: text-overflow has no effect on a flex
+   container's own content, and every pill here is plain text — so this is
+   also what lets max-width + ellipsis below work on the pill itself instead
+   of needing a nested block-level child per pill. */
 .pill {
-  display: inline-flex; align-items: center;
+  display: inline-block; vertical-align: middle;
   border-radius: var(--r-pill); padding: 4px 13px;
   font-size: 11.5px; font-weight: 700; letter-spacing: var(--wide);
   text-transform: uppercase; white-space: nowrap;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
 }
 .pill-type { background: transparent; border: 1px solid var(--line); color: var(--slate); }
+.s-draft    { background: var(--sunken);  color: var(--slate); }
 .s-pending  { background: var(--warn-bg); color: var(--warn-fg); }
 .s-working  { background: var(--info-bg); color: var(--info-fg); }
 .s-approved { background: var(--ok-bg);   color: var(--ok-fg); }
@@ -507,7 +513,15 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
 .chart-empty { margin-top: var(--s3); font-size: 14px; color: var(--dust); }
 
 .chart-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s2); }
+/* Sizing only — the dropdown/option look itself is .filter-combo/
+   .filter-trigger's own shared style now (see below), same as ProjectGrid's
+   Sort/Status filters. The .chart-filter.filter-trigger pairing (two
+   classes) is what makes min-width: 0 win over .filter-trigger's own 168px
+   regardless of which rule the cascade sees first — this one stays the
+   compact size it always was, not stretched to match ProjectGrid's wider
+   trigger. */
 .chart-filter { flex: none; max-width: 150px; }
+.chart-filter.filter-trigger { min-width: 0; }
 .ctl-xs { min-height: 32px; padding: 0 10px 0 12px; font-size: 12.5px; }
 
 /* Bar chart: an axis column of tick labels beside a row of columns, each a
@@ -529,8 +543,23 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
 }
 .bar-value { font-size: 11.5px; font-weight: 500; color: var(--slate); margin-bottom: 6px; }
 .bar {
+  position: relative; cursor: pointer;
   width: 60%; min-height: 3px; border-radius: 3px 3px 0 0;
   background: color-mix(in srgb, var(--accent) 62%, white);
+  transition: opacity .1s ease;
+}
+/* The project's own name on hover/focus — .bar-label already shows it, but
+   clamped to two lines, so a long one still has somewhere to be read whole.
+   Anchored to the bar's own top edge (see .bar's position: relative) so it
+   overlays the bar itself, not the column of text sitting above it. */
+.bar-tooltip {
+  position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+  padding: 5px 9px; border-radius: var(--r-btn);
+  background: var(--ink); color: var(--text-invert);
+  font-size: 11.5px; white-space: nowrap; box-shadow: var(--lift-1);
+  /* Never the hit target itself — .bar's own onMouseMove/onMouseLeave stay
+     in charge even while the tooltip visually sits right under the pointer. */
+  pointer-events: none;
 }
 /* Two-line clamp rather than a single-line ellipsis: a name's min-content
    contribution to the flex column above is just its longest word this way
@@ -544,21 +573,41 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
-/* Donut: a conic-gradient ring with a plain surface-colour circle punched in
-   the middle — no SVG, no library, and it re-colours from CSS custom
-   properties the same as every other chrome on the page. */
+/* Donut: an inline SVG ring (no chart library) — each bucket is its own
+   <circle>, so it can carry its own hover/focus tooltip the way a plain
+   conic-gradient background never could (that was one DOM node, one hover
+   state for the whole ring; this is one per slice). Re-colours from the
+   same CSS custom properties as every other chrome on the page either way. */
 .donut-chart { display: flex; flex-direction: column; align-items: center; gap: var(--s3); margin-top: var(--s4); }
-.donut-ring {
-  width: 148px; height: 148px; border-radius: 50%;
-  display: grid; place-items: center; flex: none;
-}
+.donut-ring-wrap { position: relative; width: 148px; height: 148px; flex: none; }
+.donut-ring { display: block; width: 100%; height: 100%; overflow: visible; }
 .donut-center {
+  position: absolute; inset: 0; margin: auto;
   width: 62%; height: 62%; border-radius: 50%; background: var(--surface);
-  display: grid; place-items: center; text-align: center;
+  place-items: center; text-align: center;
+  padding-top: 23px;
+  pointer-events: none;
 }
-.donut-total { font-family: var(--mono); font-size: 24px; font-weight: 500; color: var(--ink); line-height: 1; }
+.donut-total { font-family: var(--mono); font-size: 26px; font-weight: 500; color: var(--ink); line-height: 1; }
 .donut-total-label { margin-top: 3px; font-size: 11px; color: var(--slate); }
-.donut-legend { width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+/* Anchored to the hovered slice's own midpoint (see DocumentsByTypeChart's
+   anchor calc) rather than the pointer — it never has to track a mousemove
+   to land in the right place, and it reads the same on keyboard focus as
+   on hover, same as every other tooltip in the app. */
+.donut-tooltip {
+  position: absolute; transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 5px 9px; border-radius: var(--r-btn);
+  background: var(--ink); color: var(--text-invert);
+  font-size: 11.5px; white-space: nowrap; line-height: 1.3;
+  pointer-events: none; box-shadow: var(--lift-1); z-index: 1;
+}
+.donut-tooltip-value { font-family: var(--mono); font-weight: 600; font-size: 13px; }
+.donut-tooltip-label { opacity: .85; }
+/* Narrower than the card itself and centred under the ring, not stretched
+   edge to edge — a wide card used to leave a bare gap between the label and
+   its own count/percent. */
+.donut-legend { width: 100%; max-width: 220px; margin: 0 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
 .donut-legend li { display: flex; align-items: center; gap: 9px; font-size: 13px; min-width: 0; }
 .legend-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; border: 1px solid var(--line); }
 .legend-label {
@@ -609,20 +658,43 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
    matter how the rest of the app looks. Collapsed to "Label: current value"
    until clicked, same as a Windows column-filter dropdown. */
 .filter-combo { flex: none; }
-.filter-trigger { display: inline-flex; align-items: center; gap: 10px; justify-content: space-between; min-width: 168px; cursor: pointer; }
+.filter-trigger {
+  display: inline-flex; align-items: center; gap: 10px; justify-content: space-between;
+  min-width: 168px; padding-right: 18px; cursor: pointer;
+}
 /* .ctl:focus turns the border ink on any focus, mouse clicks included — so
    opening the menu (or clicking away to dismiss it) left the trigger
    permanently looking "active" even once closed, indistinguishable from an
    applied filter. :focus-visible only fires for real keyboard focus, which
    is the only time an outline is actually earning its keep here. */
 .filter-trigger:focus:not(:focus-visible) { border-color: var(--line); }
+/* --accent's own established role ("focus ring" — see tokens.css) while the
+   panel's open, same as a focused text input's border would turn. */
+.filter-trigger[aria-expanded="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
 .filter-chevron { color: var(--slate); transition: transform .14s ease; transform: rotate(90deg); }
 .filter-chevron.is-open { transform: rotate(-90deg); }
 /* Both lists are short and fixed (five statuses, four sorts) — never long
    enough to need their own scrollbar, so the base .combo-menu's max-height
    (sized for Combobox.jsx's much longer suggestion lists) only clipped them
-   and forced one in here for no reason. */
-.filter-combo .combo-menu { left: auto; right: 0; width: max-content; min-width: 100%; max-height: none; overflow: visible; }
+   and forced one in here for no reason. Width matches the trigger exactly
+   rather than growing to its widest option's own content. */
+/* A rounder panel with each option its own inset rounded row, not a flat
+   hairline-divided list. */
+.filter-combo .combo-menu {
+  left: auto; right: 0; width: 100%; max-height: none; overflow: visible;
+  padding: 6px; border-radius: var(--r-stad);
+}
+.filter-combo .combo-menu button {
+  border-top: 0; border-radius: var(--r-btn); padding: 10px 14px;
+}
+.filter-combo .combo-menu button + button { margin-top: 2px; }
+.filter-combo .combo-menu button:hover,
+.filter-combo .combo-menu button:focus-visible {
+  background: #6b7887; color: var(--text-invert);
+}
 .combo-menu button.is-selected { color: var(--ink); font-weight: 600; }
 
 /* Same track-with-a-filled-pressed-state construction as .seg, just square
@@ -860,7 +932,7 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
   border: 1px solid var(--hair);
   border-radius: var(--r-stad);
 }
-.phead-main { display: flex; align-items: flex-end; gap: 20px; flex-wrap: wrap; margin-top: 14px; }
+.phead-main { display: flex; align-items: flex-end; flex-wrap: wrap; margin-top: 14px; }
 .phead-main .spacer { flex: 1; }
 .phead .code {
   font-family: var(--mono); font-size: 32px; font-weight: 500;
@@ -891,6 +963,7 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
 .ptabs {
   display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap;
   margin-top: var(--s3);
+  margin-bottom: var(--s3);
   /* Fixed regardless of content — Quote Analysis's own "Upload quotation"
      button (44px, .btn-sm) only shows on that one tab; without a floor
      here, the row shrinks to fit the shorter Documents/Materials buttons
@@ -992,6 +1065,8 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
 }
 .drow:hover { background: var(--hover); }
 .drow:hover .open-sm { background: var(--ink); border-color: var(--ink); color: var(--text-invert); }
+.drow-draft { cursor: default; }
+.drow-draft:hover { background: none; }
 .c-id   { font-family: var(--mono); font-size: 13px; color: var(--slate); }
 .c-vend { font-size: 15.5px; font-weight: 500; }
 .c-site { font-size: 14px; color: var(--slate); }
@@ -1016,6 +1091,15 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
   --cols: 34px 92px 112px minmax(150px, 1.8fr) minmax(110px, .9fr)
           minmax(110px, .9fr) minmax(100px, .8fr) 96px minmax(110px, .8fr) 40px;
 }
+/* One more fixed-width column for the row checkbox — only added when the
+   caller turns on bulk selection (DocumentsSection's bulkActions), so the
+   Document Register's own read-only table keeps its original columns. */
+.dgrid.reg.selectable {
+  --cols: 34px 34px 92px 112px minmax(150px, 1.8fr) minmax(110px, .9fr)
+          minmax(110px, .9fr) minmax(100px, .8fr) 96px minmax(110px, .8fr) 40px;
+}
+.c-check { display: flex; align-items: center; justify-content: center; }
+.c-check input { width: 16px; height: 16px; cursor: pointer; margin: 0; }
 
 /* Rectangular, not circular: a document is a rectangle, and the crop has to
    leave enough of the page to tell a dense invoice from a one-line challan. */
@@ -1036,6 +1120,7 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
 
 @media (max-width: 1180px) {
   .drow .c-thumb { order: -2; }
+  .drow .c-check { order: -3; }
   .drow .c-proj { font-size: 12px; }
 }
 
@@ -1059,6 +1144,12 @@ select.input { border-radius: var(--r-btn); padding: 0 14px; }
 /* ── filter bar (materials) ───────────────────────────────────────────────── */
 .filter-bar { display: flex; align-items: center; gap: var(--s1); flex-wrap: wrap; margin-bottom: var(--s4); }
 .filter-bar label { display: inline-flex; align-items: center; gap: var(--s1); font-size: 13px; color: var(--slate); }
+.filter-bar-actions { display: flex; align-items: center; gap: var(--s1); margin-left: auto; }
+/* Matches .input-search's own 46px/pill-radius-minus-select-override height
+   beside it (see select.input) — .filter-trigger's default 40px (.ctl's
+   toolbar scale) would sit visibly shorter than the search box in the same
+   row otherwise. */
+.filter-bar-combo .filter-trigger { min-height: 46px; padding: 0 18px 0 14px; }
 
 /* ── tables: kept where numbers are meant to be compared down a column ────── */
 .card { background: var(--surface); border: 1px solid var(--hair); border-radius: var(--r-stad); overflow: hidden; }
@@ -1345,6 +1436,39 @@ table.data td.quote-cell { padding: 0; }
 }
 .icon-btn-danger:hover { background: var(--bad-bg); color: var(--bad-fg); border-color: var(--bad-fg); }
 
+/* The notification bell in TopNav — same compact icon-button shape as
+   .icon-btn-danger, neutral rather than destructive. notif-dot is the red
+   marker for at least one scanned batch still awaiting Process/Draft; it's
+   removed only once every such batch is actually confirmed (see
+   usePendingScans), never just by opening or closing the dropdown/modal. */
+.icon-btn {
+  flex: none; width: 38px; height: 38px;
+  border: 1px solid var(--line); border-radius: var(--r-btn);
+  background: var(--surface); color: var(--slate);
+  display: grid; place-items: center;
+  cursor: pointer; position: relative;
+}
+.icon-btn:hover { background: var(--hover); }
+/* A compact variant of .icon-btn for sitting inline in text, eg. the edit
+   pencil on the Approved banner in ReviewModal. */
+.icon-btn-sm { width: 28px; height: 28px; }
+.icon-btn-sm svg { width: 15px; height: 15px; }
+/* Just the glyph — no border, no background box, eg. the edit pencil next
+   to the Review document title. */
+.icon-btn-bare {
+  flex: none; width: 44px; height: 44px;
+  border: none; background: none; color: var(--slate);
+  display: grid; place-items: center; cursor: pointer; padding: 0;
+}
+.icon-btn-bare:hover { color: var(--ink); }
+.notif-dot {
+  position: absolute; top: 6px; right: 6px;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--bad-fg); border: 1.5px solid var(--surface);
+}
+.notif-menu { left: auto; right: 0; width: 340px; max-height: 60vh; overflow-y: auto; }
+.notif-empty { padding: 16px 18px; font-size: 14px; color: var(--slate); }
+
 /* ── forms ────────────────────────────────────────────────────────────────── */
 .form { display: flex; flex-direction: column; gap: var(--s3); }
 .form label { display: flex; flex-direction: column; gap: 6px; }
@@ -1413,6 +1537,7 @@ table.data td.quote-cell { padding: 0; }
 .qr-frame svg { width: 100%; height: auto; display: block; max-width: 280px; }
 .steps { margin: var(--s3) 0 0; padding-left: var(--s3); font-size: 14px; color: var(--slate); }
 .steps li { margin-bottom: 6px; }
+.modal-body p.hint { margin: var(--s3) 0 0; font-size: 13px; color: var(--slate); }
 .kv { margin-top: var(--s3); border-top: 1px solid var(--hair); padding-top: var(--s2); font-size: 13px; }
 .kv div { display: flex; justify-content: space-between; gap: var(--s2); padding: 4px 0; }
 .kv span:first-child { color: var(--slate); }
@@ -1678,25 +1803,69 @@ table.lines tbody td:nth-child(3) .input { max-width: 260px; }
 /* A dot-and-line rail down the left edge, each entry's own status colour on
    its dot (the same d-ok/d-no/d-ink discs the rest of the app already
    uses) — the trailing "Next delivery" entry is always present and always
-   muted, a placeholder rather than a forecast this data can't make. */
-.timeline { list-style: none; margin: var(--s2) 0 0; padding: 0 var(--s3) var(--s3); }
-.timeline li {
+   muted, a placeholder rather than a forecast this data can't make.
+
+   Every selector below is scoped to a direct child (.timeline > li) rather
+   than a plain descendant one — this rail's own li and the nested
+   .timeline-events li one delivery's expanded history renders in are both
+   <li> elements under the same .timeline ancestor, and a bare ".timeline
+   li" matches both, which used to hand the rail's own flex/border/padding
+   down onto every event line too. */
+/* Capped and scrolling as soon as the content itself reaches the max-height
+   (set inline — see DeliveryTimeline's maxHeightPx), not gated behind a
+   delivery-count guess — otherwise the rail would out-grow the viewport
+   and drag .compare-aside's own position: sticky down with it. */
+.timeline { list-style: none; margin: var(--s2) 0 0; padding: 0 var(--s3) var(--s3); overflow-y: auto; }
+.timeline > li {
   position: relative;
   display: flex; gap: 12px;
   padding: 0 0 var(--s3) 22px;
   border-left: 1.5px solid var(--hair);
   margin-left: 5px;
 }
-.timeline li:last-child { border-left-color: transparent; padding-bottom: 0; }
-.timeline li.is-future { color: var(--dust); }
+.timeline > li:last-child { border-left-color: transparent; padding-bottom: 0; }
+.timeline > li.is-future { color: var(--dust); }
 .timeline-dot {
   position: absolute; left: -6.5px; top: 2px;
   width: 11px; height: 11px; border-radius: 50%;
   border: 2px solid var(--surface);
 }
 .timeline-date { font-size: 13px; font-weight: 600; color: var(--ink); }
-.timeline li.is-future .timeline-date { color: var(--dust); font-weight: 500; }
+.timeline > li.is-future .timeline-date { color: var(--dust); font-weight: 500; }
 .timeline-desc { margin-top: 2px; font-size: 12.5px; line-height: 1.5; color: var(--slate); }
+/* The whole delivery block — date, invoice number and (once open) its own
+   event history — is the click target, not just the date line, so there's
+   nowhere in a delivery a reviewer can miss and think it's inert. Each
+   delivery opens/closes independently (see DeliveryTimeline's openKeys). */
+.timeline-entry { cursor: pointer; }
+.timeline-entry:hover .timeline-date { color: var(--ink); text-decoration: underline; }
+/* The collapsed prompt to expand and see everything before the one event
+   already showing — a plain note, not another event on the rail (a bare
+   div, not a .timeline-events li). */
+.timeline-more { margin: 4px 0 0 18px; font-size: 12px; font-style: italic; color: var(--dust); }
+/* One delivery's own event history — captured/approved/rejected/edited, in
+   order, each as one flowing line with its own time trailing at the end
+   rather than in a separate leading column. Same dot-and-line rail as
+   before, just a small plain dot in place of the icon — what actually
+   happened still reads apart at a glance via the dot's tone colour. */
+.timeline-events { list-style: none; margin: 8px 0 0; padding: 0 0 0 4px; }
+.timeline-events li {
+  position: relative;
+  padding: 0 0 8px 18px;
+  border-left: 1.5px solid var(--hair);
+  font-size: 12.5px; line-height: 1.5; color: var(--slate);
+}
+.timeline-events li:last-child { border-left-color: transparent; padding-bottom: 0; }
+.timeline-event-dot {
+  position: absolute; left: -4px; top: 5px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #6b7887;
+}
+.timeline-event-time { color: var(--dust); }
+/* Used bare (a single document's own history — see DocumentTimeline on the
+   PO tab) instead of nested inside a delivery's own .timeline > li — needs
+   the card's own edge padding that nesting would otherwise have supplied. */
+.timeline-events-standalone { margin-top: var(--s2); padding: 0 var(--s3) var(--s3) calc(var(--s3) + 4px); }
 
 /* ── Purchase Bot ─────────────────────────────────────────────
    A docked panel, not a modal: the answer is read against the screen behind it,

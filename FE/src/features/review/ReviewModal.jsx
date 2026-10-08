@@ -4,6 +4,7 @@ import { HeaderFields } from "./HeaderFields.jsx";
 import { LineItems } from "./LineItems.jsx";
 import { openPurchaseBillTab, PurchaseBillPreview, PurchaseBillVoucher } from "./PurchaseBillVoucher.jsx";
 import { HEADER_KEYS, LINE_FIELDS } from "./schema.js";
+import { IconEdit } from "../../components/Icons.jsx";
 import { api } from "../../lib/api.js";
 import { checkArithmetic, isLocked, isWaiting, money, projectOf, qty } from "../../lib/format.js";
 import { gstinChecksumOk, gstinIsSelf } from "../../lib/gstin.js";
@@ -67,6 +68,11 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
   const [draft, setDraft] = useState(null);
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("reviewerName") ?? "");
   const [rejecting, setRejecting] = useState(false);
+  /* Reopens an APPROVED document's form for a correction, without moving it
+     back to EXTRACTED — see the pencil on StatusBanner's "Approved" case and
+     the Save/Cancel swap in DecisionFooter below. Only ever true for a
+     document that is (still) APPROVED; never set for EXTRACTED/REJECTED. */
+  const [editingApproved, setEditingApproved] = useState(false);
   const [reason, setReason] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -143,10 +149,10 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
       lines: d.lines.map((l) => (l.line_no === lineNo ? { ...l, [key]: value } : l)),
     }));
 
-  const save = useCallback(async ({ silent = false } = {}) => {
+  const save = useCallback(async ({ silent = false, extra = {} } = {}) => {
     setErr("");
     try {
-      const updated = await api.saveDocument(docId, buildEdits(draft));
+      const updated = await api.saveDocument(docId, { ...buildEdits(draft), ...extra });
       if (!silent) { setDoc(updated); onChanged(); }
       return updated;
     } catch (e) {
@@ -159,6 +165,41 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
     const name = reviewer.trim();
     if (name) localStorage.setItem("reviewerName", name);
     return name;
+  };
+
+  /* Pencil on the Approved banner — snapshots the document's current
+     (already-approved) values into draft so editing starts from what's
+     actually on file, not whatever a previous edit-then-cancel left behind. */
+  const beginEditApproved = () => {
+    setErr("");
+    setDraft({
+      header: { ...(doc.header ?? {}) },
+      lines: (doc.lines ?? []).map((l) => ({ ...l })),
+    });
+    setEditingApproved(true);
+  };
+
+  /* Same "enter your name first" gate Approve has always had — see decide()
+     below — applied to this Save instead, since this is the one Save that
+     actually changes an already-decided document. Records the name onto
+     reviewed_by/reviewed_at (server side) and drops back to the read-only
+     Approved view on success; a failed save leaves editing open so nothing
+     is silently lost. */
+  const saveApprovedEdit = async () => {
+    const name = rememberReviewer();
+    if (!name) { setErr("Enter your name first."); return; }
+    setBusy(true);
+    const ok = await save({ extra: { edited_by: name } });
+    setBusy(false);
+    if (ok) setEditingApproved(false);
+  };
+
+  /* No save call at all — locked flips back on, so the header/lines below
+     render straight from doc again and whatever was typed into draft during
+     this edit session is simply never read. */
+  const cancelEditApproved = () => {
+    setErr("");
+    setEditingApproved(false);
   };
 
   const decide = async (kind) => {
@@ -212,7 +253,7 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
   };
 
   const subtitle = doc ? `${doc.document_id} — ${projectOf(doc)}` : docId;
-  const locked = doc ? isLocked(doc) : false;
+  const locked = doc ? isLocked(doc) && !editingApproved : false;
   const header = locked ? (doc?.header ?? {}) : draft?.header;
   /* header can be briefly undefined even once doc.status is EXTRACTED — the
      poll's setDoc(fresh) and the effect that populates draft from it commit
@@ -252,6 +293,25 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
         )]
       : [];
 
+  /* A MIN Voucher's own number is its doc_number, not dc_number — see
+     REQUIRED_FIELDS_BY_KIND's note on INWARD above — so a Purchase Bill's
+     min_number is suggested from INWARD documents the same way dc_number is
+     suggested from INVOICE documents: same project, same PO. Only offered
+     once a PO number is on the form, for the same reason dcNumberOptions
+     waits for one — an INWARD not yet tied to that PO isn't the MIN this
+     bill was closed from. */
+  const minNumberOptions =
+    doc && header?.doc_kind === "PURCHASE_BILL" && header?.po_number
+      ? [...new Set(
+          (docs ?? [])
+            .filter((d) =>
+              d.project_id === doc.project_id && d.document_type === "INWARD"
+              && d.po_number === header.po_number && d.doc_number
+            )
+            .map((d) => d.doc_number)
+        )]
+      : [];
+
   return (
     <Modal
       title="Review document"
@@ -259,13 +319,25 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
       wide
       closable={!doc || !isWaiting(doc)}
       onClose={attemptClose}
+      headerExtra={doc?.status === "APPROVED" && !editingApproved ? (
+        <button
+          type="button"
+          className="icon-btn-bare"
+          onClick={beginEditApproved}
+          title="Edit this document"
+          aria-label="Edit this document"
+        >
+          <IconEdit width={26} height={26} />
+        </button>
+      ) : null}
       footer={showFooter ? (
         <DecisionFooter
           reviewer={reviewer}
           setReviewer={setReviewer}
           busy={busy}
           gates={gates}
-          onSave={async () => {
+          editingApproved={editingApproved}
+          onSave={editingApproved ? saveApprovedEdit : async () => {
             setBusy(true);
             const ok = await save();
             setBusy(false);
@@ -273,6 +345,7 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
           }}
           onApprove={() => decide("approve")}
           onReject={() => setRejecting(true)}
+          onCancel={cancelEditApproved}
         />
       ) : null}
     >
@@ -355,6 +428,7 @@ export function ReviewModal({ docId, docs, materials, onClose, onChanged }) {
                 gates={gates}
                 poNumberOptions={poNumberOptions}
                 dcNumberOptions={dcNumberOptions}
+                minNumberOptions={minNumberOptions}
                 materials={materials}
                 lineIssues={lineIssues}
                 rejecting={rejecting}
@@ -575,7 +649,7 @@ export function ArithmeticBanner({ header, lines }) {
    footer strip rather than inline in the scrolling body — the actions that
    finish a review stay in the same place regardless of how long the body
    above them gets. */
-function DecisionFooter({ reviewer, setReviewer, busy, gates, onSave, onApprove, onReject }) {
+function DecisionFooter({ reviewer, setReviewer, busy, gates, editingApproved, onSave, onApprove, onReject, onCancel }) {
   return (
     <>
       <input
@@ -587,25 +661,31 @@ function DecisionFooter({ reviewer, setReviewer, busy, gates, onSave, onApprove,
       />
       <div className="spacer" />
       <button
-        className="btn btn-quiet"
+        className={editingApproved ? "btn btn-ink" : "btn btn-quiet"}
         onClick={onSave}
         disabled={busy || gates.missingFields.length > 0}
-        title={missingFieldsTitle(gates, "save")}
+        title={missingFieldsTitle(gates, editingApproved ? "saving" : "save")}
       >
         Save
       </button>
-      <button
-        className="btn btn-ink"
-        onClick={onApprove}
-        disabled={busy || gates.typeMissing || gates.missingFields.length > 0}
-        title={
-          gates.typeMissing ? "Please fill a document type, eg: PO, Invoice"
-            : missingFieldsTitle(gates, "approving")
-        }
-      >
-        Approve
-      </button>
-      <button className="btn btn-out" onClick={onReject} disabled={busy}>Reject</button>
+      {editingApproved ? (
+        <button className="btn btn-out" onClick={onCancel} disabled={busy}>Cancel</button>
+      ) : (
+        <>
+          <button
+            className="btn btn-ink"
+            onClick={onApprove}
+            disabled={busy || gates.typeMissing || gates.missingFields.length > 0}
+            title={
+              gates.typeMissing ? "Please fill a document type, eg: PO, Invoice"
+                : missingFieldsTitle(gates, "approving")
+            }
+          >
+            Approve
+          </button>
+          <button className="btn btn-out" onClick={onReject} disabled={busy}>Reject</button>
+        </>
+      )}
     </>
   );
 }
@@ -660,7 +740,7 @@ function fieldErrorsFor(gates, header, poNumberOptions) {
 }
 
 function Body({
-  header, lines, locked, gates, poNumberOptions, dcNumberOptions, materials, lineIssues,
+  header, lines, locked, gates, poNumberOptions, dcNumberOptions, minNumberOptions, materials, lineIssues,
   rejecting, reason, setReason, err, busy, onHeader, onLine, onDecide,
 }) {
   if (!header) return <div className="empty">Loading…</div>;
@@ -672,7 +752,7 @@ function Body({
         locked={locked}
         onChange={onHeader}
         fieldErrors={locked ? {} : fieldErrorsFor(gates, header, poNumberOptions)}
-        fieldOptions={{ po_number: poNumberOptions, dc_number: dcNumberOptions }}
+        fieldOptions={{ po_number: poNumberOptions, dc_number: dcNumberOptions, min_number: minNumberOptions }}
       />
       <LineItems
         lines={lines ?? []}

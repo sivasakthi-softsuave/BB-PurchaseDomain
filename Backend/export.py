@@ -48,9 +48,15 @@ def build_workbook(con: sqlite3.Connection, project: sqlite3.Row) -> io.BytesIO:
     read as a real purchase. The count of what was dropped goes on Summary so
     the omission is visible rather than silent; the documents themselves stay
     in the console, which is where the audit trail lives.
+
+    A scanned batch the console hasn't yet chosen Process or Draft for
+    (awaiting_scan_decision) is excluded outright, same as list_documents —
+    it isn't part of the project's documents yet, so it isn't part of what
+    left the building either.
     """
     every_document = con.execute(
-        "SELECT * FROM documents WHERE project_id = ? ORDER BY uploaded_at DESC",
+        "SELECT * FROM documents WHERE project_id = ? AND awaiting_scan_decision = 0"
+        " ORDER BY uploaded_at DESC",
         (project["id"],),
     ).fetchall()
     rejected_count = sum(1 for d in every_document if d["status"] == "REJECTED")

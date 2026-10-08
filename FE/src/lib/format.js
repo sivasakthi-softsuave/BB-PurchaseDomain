@@ -42,6 +42,46 @@ export const longDate = (stamp) => {
     : d.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
 };
 
+/* Same idea, but with the time too — for an event log (Delivery Timeline)
+   where two things happening on the same day still need telling apart. */
+export const dateTime = (stamp) => {
+  const d = new Date(String(stamp).replace(" ", "T"));
+  return Number.isNaN(d.getTime())
+    ? String(stamp).slice(0, 16)
+    : d.toLocaleString("en-IN", {
+        day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit",
+      });
+};
+
+/* A Delivery Timeline event's own trailing timestamp — "4 hours ago" for
+   anything that happened in the last day, since that's still legible at a
+   glance; the full date once it's further back than that, the same as any
+   other timestamp on this screen.
+
+   A Delivery Timeline event mixes two shapes of stamp: uploaded_at ("2026-
+   09-26 11:51:27", genuinely UTC but carrying no offset of its own) and
+   reviewed_at/edited_at/deleted_at ("...T11:51:39+00:00", explicit UTC).
+   Left alone, a viewer not themselves on UTC has every uploaded_at parsed
+   as *local* time instead — silently shifting "captured" by the viewer's
+   own UTC offset relative to the others, so this forces +00:00 onto
+   whichever stamp doesn't already carry its own offset. */
+export const eventTime = (stamp) => {
+  const iso = String(stamp).replace(" ", "T");
+  const d = new Date(/[+-]\d\d:\d\d$|Z$/.test(iso) ? iso : `${iso}+00:00`);
+  if (Number.isNaN(d.getTime())) return String(stamp);
+
+  const hours = (Date.now() - d.getTime()) / 3_600_000;
+  if (hours >= 0 && hours < 24) {
+    if (hours < 1) {
+      const minutes = Math.max(1, Math.floor(hours * 60));
+      return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+    }
+    const wholeHours = Math.floor(hours);
+    return `${wholeHours} hour${wholeHours === 1 ? "" : "s"} ago`;
+  }
+  return dateTime(stamp);
+};
+
 export const projectOf = (doc) =>
   doc.project_code ? `${doc.project_code} — ${doc.project_name}` : "—";
 
@@ -87,7 +127,7 @@ export const DOC_TYPE_LABELS = {
 };
 export const docTypeLabel = (t) => DOC_TYPE_LABELS[t] ?? t;
 export const DOC_STATUSES = [
-  "PENDING", "PROCESSING", "EXTRACTED", "APPROVED", "REJECTED", "FAILED",
+  "DRAFT", "PENDING", "PROCESSING", "EXTRACTED", "APPROVED", "REJECTED", "FAILED",
 ];
 
 export const titleCase = (s) => s.charAt(0) + s.slice(1).toLowerCase();
@@ -95,6 +135,7 @@ export const titleCase = (s) => s.charAt(0) + s.slice(1).toLowerCase();
 /* EXTRACTED reads as "pending" because it still needs a human — the document
    is done being read, not done being handled. */
 const STATUS_CLASS = {
+  DRAFT: "s-draft",
   PENDING: "s-pending",
   PROCESSING: "s-working",
   EXTRACTED: "s-pending",
@@ -105,6 +146,7 @@ const STATUS_CLASS = {
 export const statusClass = (status) => STATUS_CLASS[status] ?? "s-pending";
 
 export const isWaiting = (doc) => doc.status === "PENDING" || doc.status === "PROCESSING";
+export const isDraft = (doc) => doc.status === "DRAFT";
 export const isLocked = (doc) => doc.status === "APPROVED" || doc.status === "REJECTED";
 /* "Awaiting review" means a person, not a machine: extraction is finished and
    the document is sitting there wanting a decision. */
@@ -156,6 +198,8 @@ export function activityOf(doc) {
       return { dot: "d-hot", what: "Read — waiting on your decision" };
     case "FAILED":
       return { dot: "d-no", what: `Could not be read — ${doc.error || "unknown error"}` };
+    case "DRAFT":
+      return { dot: "d-mute", what: `${kind} saved as draft` };
     default:
       return { dot: "d-ink", what: `${kind} being read` };
   }

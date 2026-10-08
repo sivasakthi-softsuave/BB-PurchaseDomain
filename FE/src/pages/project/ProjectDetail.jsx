@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { IconBack, IconDownload, IconPlus, IconPrint, IconTrash } from "../../components/Icons.jsx";
+import { IconBack, IconPlus, IconTrash } from "../../components/Icons.jsx";
 import { AddDocumentMenu } from "../../components/AddDocumentMenu.jsx";
 import { DocumentsSection } from "../../components/DocumentsSection.jsx";
 import { Modal } from "../../components/Modal.jsx";
@@ -20,7 +20,9 @@ const SECTIONS = [
   { id: "quotes", label: "Quote Analysis" },
 ];
 
-export function ProjectDetail({ project, docs, materials, reload, onOpenDocument, onAddDocument, onScan }) {
+export function ProjectDetail({
+  project, docs, materials, reload, onOpenDocument, onAddDocument, onScan, onProcessed,
+}) {
   const [section, setSection] = useState("po");
   // Owned here rather than inside QuoteAnalysisSection so the button that
   // flips it can sit in the shared tab row instead of its own header line.
@@ -76,21 +78,6 @@ export function ProjectDetail({ project, docs, materials, reload, onOpenDocument
             </div>
             <div className="spacer" />
             <div className="phead-actions">
-              <button className="btn btn-out btn-sm" type="button" onClick={() => window.print()}>
-                <IconPrint width={16} height={16} />
-                Print
-              </button>
-              {/* An anchor, not a fetch: the server names the file in its
-                  Content-Disposition, and letting the browser handle the
-                  download keeps that name. */}
-              <a
-                className="btn btn-out btn-sm"
-                href={api.exportUrl(project.id)}
-                title="Summary, documents, line items and materials rollup as .xlsx"
-              >
-                <IconDownload width={16} height={16} />
-                Export
-              </a>
               <AddDocumentMenu
                 onScan={() => onScan(project)}
                 onUpload={() => onAddDocument(project)}
@@ -106,29 +93,6 @@ export function ProjectDetail({ project, docs, materials, reload, onOpenDocument
               </button>
             </div>
           </div>
-
-          {confirmingDelete ? (
-            <div className="banner banner-err" style={{ marginTop: 16 }}>
-              <div>
-                Delete {project.code} and everything under it — every document, invoice, PO and
-                quotation? This can't be undone.
-              </div>
-              <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-                <button className="btn btn-signal btn-sm" type="button" onClick={deleteProject} disabled={deleting}>
-                  {deleting ? "Deleting…" : "Delete project"}
-                </button>
-                <button
-                  className="btn btn-out btn-sm"
-                  type="button"
-                  onClick={() => setConfirmingDelete(false)}
-                  disabled={deleting}
-                >
-                  Cancel
-                </button>
-              </div>
-              {deleteErr ? <div style={{ marginTop: 8 }}>{deleteErr}</div> : null}
-            </div>
-          ) : null}
 
           {/* The project's own numbers on a hairline — a stat strip here would
               be four more boxes on a page whose problem was boxes. */}
@@ -224,7 +188,41 @@ export function ProjectDetail({ project, docs, materials, reload, onOpenDocument
             docs={projectDocs}
             onOpenDocument={onOpenDocument}
             emptyLabel="No documents in this project yet."
+            bulkActions
+            reload={reload}
+            onProcessed={onProcessed}
           />
+        </Modal>
+      ) : null}
+
+      {confirmingDelete ? (
+        <Modal
+          title="Delete project"
+          subtitle={project.code}
+          closable={!deleting}
+          onClose={() => setConfirmingDelete(false)}
+          footer={
+            <>
+              <div className="spacer" />
+              <button
+                className="btn btn-out"
+                type="button"
+                onClick={() => setConfirmingDelete(false)}
+                disabled={deleting}
+              >
+                Cancel
+              </button>
+              <button className="btn btn-signal" type="button" onClick={deleteProject} disabled={deleting}>
+                {deleting ? "Deleting…" : "Delete project"}
+              </button>
+            </>
+          }
+        >
+          <p>
+            Delete {project.code} and everything under it — every document, invoice, PO and
+            quotation? This can't be undone.
+          </p>
+          {deleteErr ? <div className="banner banner-err">{deleteErr}</div> : null}
         </Modal>
       ) : null}
 

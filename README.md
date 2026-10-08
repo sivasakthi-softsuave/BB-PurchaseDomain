@@ -148,6 +148,12 @@ npx expo start
 Scan the Metro QR with Expo Go to load the app. That is a *different* QR from the connect QR
 served by the backend — Metro's loads the app, the backend's authenticates the session.
 
+If Expo Go fails to load the bundle (`Failed to download remote update` / `Something went
+wrong`), the phone can't reach Metro directly — different subnet, guest-Wi-Fi client isolation,
+or a firewall blocking port 8081. Run `npm run start:tunnel` instead (routes through ngrok,
+`@expo/ngrok` is already a dev dependency) so Expo Go loads over any network, not just the local
+one. Slower than LAN — use plain `npx expo start` when the phone genuinely is on the same Wi-Fi.
+
 ---
 
 ## The flow
